@@ -1,0 +1,929 @@
+=================================================
+MEMBER 1 — ORDER SERVICE + AGENTIC AI
+=================================================
+
+GLOBAL CONTEXT (read before starting any task):
+- Tech stack: Java 21, Spring Boot 3.x, H2 (file or in-memory), Spring Cloud Stream / spring-kafka,
+  LangChain4j
+- This service's own database: order_db
+- Base package: com.ecommerce.order
+- Kafka topics used: "order-events" (this service PUBLISHES to it),
+  "inventory-events" (this service CONSUMES from it)
+- Event envelope format for ALL Kafka messages (both topics):
+  {
+    "eventType": "OrderCreatedEvent",
+    "eventId": "<uuid>",
+    "timestamp": "<ISO-8601>",
+    "payload": { ... }
+  }
+- Other services' base URLs (configure in application.yml):
+  - Product & Inventory Service: http://localhost:8082
+  - Shipping Service: http://localhost:8083
+- This service runs on port 8081
+
+
+=================================================
+TASK 1.1 — Order Entity, Repository, and Create/View REST Endpoints
+=================================================
+
+GOAL:
+Set up the Order Service's core data layer and expose 3 REST endpoints:
+create an order, view a single order, and view order history.
+
+--------------------------------------------------
+FILES TO CREATE (with full path)
+--------------------------------------------------
+1. src/main/java/com/ecommerce/order/entity/Order.java
+2. src/main/java/com/ecommerce/order/entity/OrderItem.java
+3. src/main/java/com/ecommerce/order/repository/OrderRepository.java
+4. src/main/java/com/ecommerce/order/repository/OrderItemRepository.java
+5. src/main/java/com/ecommerce/order/dto/CreateOrderRequest.java
+6. src/main/java/com/ecommerce/order/dto/OrderItemRequest.java
+7. src/main/java/com/ecommerce/order/dto/OrderResponse.java
+8. src/main/java/com/ecommerce/order/dto/OrderItemResponse.java
+9. src/main/java/com/ecommerce/order/exception/OrderNotFoundException.java
+10. src/main/java/com/ecommerce/order/service/OrderService.java
+11. src/main/java/com/ecommerce/order/controller/OrderController.java
+
+--------------------------------------------------
+FILE 1: Order.java
+--------------------------------------------------
+Package: com.ecommerce.order.entity
+Annotations: @Entity, @Table(name = "orders")
+
+Fields:
+| Field name       | Java type       | Column annotation                             |
+|------------------|-----------------|-------------------------------------------------|
+| id               | UUID            | @Id @GeneratedValue                              |
+| customerId       | UUID            | @Column(name="customer_id", nullable=false)      |
+| status           | String          | @Column(nullable=false) — values: "PENDING","CONFIRMED","REJECTED","CANCELLED","SHIPPED","COMPLETED" |
+| totalAmount      | BigDecimal      | @Column(name="total_amount", nullable=false)     |
+| rejectionReason  | String          | @Column(name="rejection_reason", nullable=true)  |
+| createdAt        | Instant         | @Column(name="created_at", nullable=false)       |
+| updatedAt        | Instant         | @Column(name="updated_at", nullable=false)       |
+| items            | List<OrderItem> | @OneToMany(mappedBy="order", cascade=CascadeType.ALL, orphanRemoval=true) |
+
+Include: no-args constructor, all-args constructor, getters, setters
+(or Lombok @Getter @Setter @NoArgsConstructor @AllArgsConstructor if Lombok is on the classpath).
+
+--------------------------------------------------
+FILE 2: OrderItem.java
+--------------------------------------------------
+Package: com.ecommerce.order.entity
+Annotations: @Entity, @Table(name = "order_items")
+
+Fields:
+| Field name  | Java type   | Column annotation                          |
+|-------------|-------------|----------------------------------------------|
+| id          | UUID        | @Id @GeneratedValue                            |
+| order       | Order       | @ManyToOne @JoinColumn(name="order_id", nullable=false) |
+| productId   | UUID        | @Column(name="product_id", nullable=false)     |
+| quantity    | Integer     | @Column(nullable=false)                        |
+| unitPrice   | BigDecimal  | @Column(name="unit_price", nullable=false)     |
+
+--------------------------------------------------
+FILE 3: OrderRepository.java
+--------------------------------------------------
+Package: com.ecommerce.order.repository
+
+public interface OrderRepository extends JpaRepository<Order, UUID> {
+    List<Order> findByCustomerId(UUID customerId);
+}
+
+--------------------------------------------------
+FILE 4: OrderItemRepository.java
+--------------------------------------------------
+Package: com.ecommerce.order.repository
+
+public interface OrderItemRepository extends JpaRepository<OrderItem, UUID> {
+}
+
+--------------------------------------------------
+FILE 5: CreateOrderRequest.java (DTO — request body for POST /orders)
+--------------------------------------------------
+Package: com.ecommerce.order.dto
+
+Fields:
+- UUID customerId
+- List<OrderItemRequest> items
+
+Example JSON input this class must deserialize:
+{
+  "customerId": "a1b2c3d4-0000-0000-0000-000000000001",
+  "items": [
+    { "productId": "b2c3d4e5-0000-0000-0000-000000000002", "quantity": 2 }
+  ]
+}
+
+Add a code comment at the top of this file:
+// TEMP: unitPrice hardcoded in OrderService until Product Service
+// integration is added (see Task 1.5)
+
+--------------------------------------------------
+FILE 6: OrderItemRequest.java (nested DTO)
+--------------------------------------------------
+Package: com.ecommerce.order.dto
+Fields:
+- UUID productId
+- Integer quantity
+
+--------------------------------------------------
+FILE 7: OrderResponse.java (DTO — response body)
+--------------------------------------------------
+Package: com.ecommerce.order.dto
+Fields:
+- UUID orderId
+- String status
+- BigDecimal totalAmount
+- List<OrderItemResponse> items
+
+Example JSON output this class must serialize to:
+{
+  "orderId": "f47ac10b-0000-0000-0000-000000000099",
+  "status": "PENDING",
+  "totalAmount": 149.98,
+  "items": [
+    { "productId": "b2c3d4e5-0000-0000-0000-000000000002", "quantity": 2, "unitPrice": 74.99 }
+  ]
+}
+
+--------------------------------------------------
+FILE 8: OrderItemResponse.java (nested DTO)
+--------------------------------------------------
+Package: com.ecommerce.order.dto
+Fields:
+- UUID productId
+- Integer quantity
+- BigDecimal unitPrice
+
+--------------------------------------------------
+FILE 9: OrderNotFoundException.java
+--------------------------------------------------
+Package: com.ecommerce.order.exception
+
+public class OrderNotFoundException extends RuntimeException {
+    public OrderNotFoundException(UUID orderId) {
+        super("Order not found: " + orderId);
+    }
+}
+
+--------------------------------------------------
+FILE 10: OrderService.java
+--------------------------------------------------
+Package: com.ecommerce.order.service
+Constructor-inject: OrderRepository, OrderItemRepository
+
+Method 1: createOrder(CreateOrderRequest request) -> OrderResponse
+  Logic:
+    1. Create Order: id=random UUID, customerId=request.customerId,
+       status="PENDING", createdAt=updatedAt=Instant.now()
+    2. For each item in request.items: create OrderItem with
+       productId=item.productId, quantity=item.quantity,
+       unitPrice=74.99 (TEMP, see Task 1.1 File 5 note); link to order
+    3. totalAmount = sum(quantity * unitPrice) across items
+    4. Save via orderRepository.save(order) (cascades to items)
+    5. Map saved entity -> OrderResponse, return it
+
+Method 2: getOrderById(UUID orderId) -> OrderResponse
+  Logic:
+    1. orderRepository.findById(orderId)
+    2. If empty, throw new OrderNotFoundException(orderId)
+    3. Map entity -> OrderResponse, return it
+
+Method 3: getOrdersByCustomer(UUID customerId) -> List<OrderResponse>
+  Logic:
+    1. orderRepository.findByCustomerId(customerId)
+    2. Map each entity -> OrderResponse
+    3. Return list (empty list allowed, NOT an error)
+
+--------------------------------------------------
+FILE 11: OrderController.java
+--------------------------------------------------
+Package: com.ecommerce.order.controller
+Annotations: @RestController @RequestMapping("/orders")
+Constructor-inject: OrderService
+
+Endpoint 1: @PostMapping
+  createOrder(@RequestBody CreateOrderRequest request) -> ResponseEntity<OrderResponse>
+  - call orderService.createOrder(request)
+  - return ResponseEntity.status(201).body(response)
+
+Endpoint 2: @GetMapping("/{orderId}")
+  getOrder(@PathVariable UUID orderId) -> ResponseEntity<OrderResponse>
+  - call orderService.getOrderById(orderId)
+  - return ResponseEntity.ok(response)
+  - add @ExceptionHandler(OrderNotFoundException.class) in this controller
+    returning ResponseEntity.status(404).body(exception.getMessage())
+
+Endpoint 3: @GetMapping(params = "customerId")
+  getOrdersByCustomer(@RequestParam UUID customerId) -> ResponseEntity<List<OrderResponse>>
+  - call orderService.getOrdersByCustomer(customerId)
+  - return ResponseEntity.ok(list)
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] POST /orders with valid body returns HTTP 201 with OrderResponse JSON, status="PENDING"
+[ ] POST /orders persists 1 row in `orders` and N rows in `order_items` (check H2 console)
+[ ] totalAmount = sum(quantity * unitPrice) exactly
+[ ] GET /orders/{validId} returns HTTP 200 with correct data
+[ ] GET /orders/{nonExistentId} returns HTTP 404 with an error message body
+[ ] GET /orders?customerId={id} returns HTTP 200 with a JSON array (empty [] allowed)
+[ ] All IDs are UUID strings, not auto-increment integers
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create Order.java and OrderItem.java
+2. Create OrderRepository.java and OrderItemRepository.java
+3. Create the 4 DTO classes
+4. Create OrderNotFoundException.java
+5. Create OrderService.java (3 methods)
+6. Create OrderController.java (3 endpoints)
+7. Test all 3 endpoints manually via Postman + check H2 console before moving to Task 1.2
+
+
+=================================================
+TASK 1.2 — Kafka Event Production (Order Lifecycle Events)
+=================================================
+
+GOAL:
+Publish Kafka events whenever an order changes state, so downstream services
+(Product & Inventory, Shipping) can react.
+
+DEPENDS ON: Task 1.1 must be complete. Also needs a running Kafka broker
+on localhost:9092 for testing — see Member 3's Task 3.0 for the shared
+docker-compose.yml (coordinate with Member 3, this should exist early).
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/order/event/dto/EventEnvelope.java
+2. src/main/java/com/ecommerce/order/event/dto/OrderCreatedPayload.java
+3. src/main/java/com/ecommerce/order/event/dto/OrderConfirmedPayload.java
+4. src/main/java/com/ecommerce/order/event/dto/OrderCancelledPayload.java
+5. src/main/java/com/ecommerce/order/event/dto/OrderRejectedPayload.java
+6. src/main/java/com/ecommerce/order/event/dto/OrderItemEventDto.java
+7. src/main/java/com/ecommerce/order/event/producer/OrderEventProducer.java
+
+FILES TO MODIFY:
+- src/main/java/com/ecommerce/order/service/OrderService.java (call producer after each state change)
+- src/main/resources/application.yml (add Kafka producer config)
+
+--------------------------------------------------
+FILE 1: EventEnvelope.java (generic wrapper, reused for all events)
+--------------------------------------------------
+Package: com.ecommerce.order.event.dto
+
+Fields:
+- String eventType
+- String eventId       (generate as UUID.randomUUID().toString() when creating)
+- String timestamp     (generate as Instant.now().toString() when creating)
+- Object payload       (one of the payload classes below)
+
+--------------------------------------------------
+FILE 2: OrderCreatedPayload.java
+--------------------------------------------------
+Package: com.ecommerce.order.event.dto
+Fields:
+- String orderId
+- String customerId
+- List<OrderItemEventDto> items
+- BigDecimal totalAmount
+
+Exact JSON this produces (inside payload):
+{
+  "orderId": "...",
+  "customerId": "...",
+  "items": [ { "productId": "...", "quantity": 2 } ],
+  "totalAmount": 149.98
+}
+
+--------------------------------------------------
+FILE 3: OrderConfirmedPayload.java
+--------------------------------------------------
+Package: com.ecommerce.order.event.dto
+Fields:
+- String orderId
+- String customerId
+- List<OrderItemEventDto> items
+
+--------------------------------------------------
+FILE 4: OrderCancelledPayload.java
+--------------------------------------------------
+Package: com.ecommerce.order.event.dto
+Fields:
+- String orderId
+- List<OrderItemEventDto> items
+- String previousStatus
+
+--------------------------------------------------
+FILE 5: OrderRejectedPayload.java
+--------------------------------------------------
+Package: com.ecommerce.order.event.dto
+Fields:
+- String orderId
+- String reason   (e.g. "INSUFFICIENT_STOCK")
+
+--------------------------------------------------
+FILE 6: OrderItemEventDto.java (shared nested shape for items in event payloads)
+--------------------------------------------------
+Package: com.ecommerce.order.event.dto
+Fields:
+- String productId
+- Integer quantity
+
+--------------------------------------------------
+FILE 7: OrderEventProducer.java
+--------------------------------------------------
+Package: com.ecommerce.order.event.producer
+Constructor-inject: KafkaTemplate<String, EventEnvelope>
+
+Method: publish(String eventType, Object payload)
+  Logic:
+    1. Build EventEnvelope: eventType=eventType, eventId=random UUID string,
+       timestamp=Instant.now().toString(), payload=payload
+    2. kafkaTemplate.send("order-events", envelope)
+       (use orderId as the Kafka message KEY if easily available, else null key is fine)
+
+--------------------------------------------------
+MODIFY: OrderService.java
+--------------------------------------------------
+- Inject OrderEventProducer into the constructor
+- At the END of createOrder(): after saving the order, call
+  orderEventProducer.publish("OrderCreatedEvent", new OrderCreatedPayload(...))
+  using the just-saved order's data
+- (OrderConfirmedEvent / OrderRejectedEvent are published later, from Task 1.3's
+  confirmOrder()/rejectOrder() methods — not from createOrder())
+- (OrderCancelledEvent is published from Task 1.4's cancelOrder())
+
+--------------------------------------------------
+MODIFY: application.yml — add:
+--------------------------------------------------
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] Calling POST /orders results in a message on the "order-events" topic
+    (verify with a local Kafka console consumer:
+     kafka-console-consumer --topic order-events --bootstrap-server localhost:9092)
+[ ] The message's eventType field equals "OrderCreatedEvent"
+[ ] The message's payload matches the JSON shape shown in File 2 exactly
+    (field names must match: orderId, customerId, items, totalAmount)
+[ ] eventId is a valid UUID string, different on every publish
+[ ] timestamp is a valid ISO-8601 string
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create EventEnvelope.java and OrderItemEventDto.java first (shared by all payloads)
+2. Create the 4 payload DTOs
+3. Create OrderEventProducer.java
+4. Add Kafka producer config to application.yml
+5. Modify OrderService.createOrder() to call the producer
+6. Start local Kafka + Zookeeper (or use docker-compose if the team has one),
+   create the "order-events" topic if not auto-created
+7. Test: call POST /orders, watch the topic with a console consumer, confirm the message appears
+
+
+=================================================
+TASK 1.3 — Kafka Event Consumption (Inventory Responses) + Confirm/Reject Logic
+=================================================
+
+GOAL:
+Listen for InventoryReservedEvent / InventoryRejectedEvent from the
+"inventory-events" topic, and transition the order to CONFIRMED or REJECTED.
+
+DEPENDS ON: Task 1.2 must be complete.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/order/event/dto/InventoryReservedPayload.java
+2. src/main/java/com/ecommerce/order/event/dto/InventoryRejectedPayload.java
+3. src/main/java/com/ecommerce/order/event/dto/InventoryUnavailableItemDto.java
+4. src/main/java/com/ecommerce/order/event/consumer/InventoryEventConsumer.java
+
+FILES TO MODIFY:
+- OrderService.java (add confirmOrder() and rejectOrder() methods)
+- application.yml (add Kafka consumer config)
+
+--------------------------------------------------
+FILE 1: InventoryReservedPayload.java
+--------------------------------------------------
+Package: com.ecommerce.order.event.dto
+Fields:
+- String orderId
+- List<OrderItemEventDto> items
+(reuses OrderItemEventDto from Task 1.2)
+
+--------------------------------------------------
+FILE 2: InventoryRejectedPayload.java
+--------------------------------------------------
+Package: com.ecommerce.order.event.dto
+Fields:
+- String orderId
+- String reason
+- List<InventoryUnavailableItemDto> unavailableItems
+
+--------------------------------------------------
+FILE 3: InventoryUnavailableItemDto.java
+--------------------------------------------------
+Package: com.ecommerce.order.event.dto
+Fields:
+- String productId
+- Integer requested
+- Integer available
+
+--------------------------------------------------
+FILE 4: InventoryEventConsumer.java
+--------------------------------------------------
+Package: com.ecommerce.order.event.consumer
+Annotations: @Component
+Constructor-inject: OrderService, ObjectMapper (for manual JSON parsing of the envelope)
+
+Method: @KafkaListener(topics = "inventory-events", groupId = "order-service")
+  onMessage(String rawMessage)
+  Logic:
+    1. Parse rawMessage into a generic map/tree first to read "eventType"
+    2. IF eventType == "InventoryReservedEvent":
+       - parse payload into InventoryReservedPayload
+       - call orderService.confirmOrder(UUID.fromString(payload.orderId))
+    3. IF eventType == "InventoryRejectedEvent":
+       - parse payload into InventoryRejectedPayload
+       - call orderService.rejectOrder(UUID.fromString(payload.orderId), payload.reason)
+    4. IF eventType is anything else: ignore (log at debug level)
+
+NOTE: If using JsonDeserializer with type headers instead of manual parsing,
+that is also acceptable — the important part is: filter by eventType field,
+route to the correct OrderService method with the correct orderId.
+
+--------------------------------------------------
+MODIFY: OrderService.java — add 2 methods
+--------------------------------------------------
+
+Method: confirmOrder(UUID orderId)
+  Logic:
+    1. orderRepository.findById(orderId), throw OrderNotFoundException if absent
+    2. Set status = "CONFIRMED", updatedAt = Instant.now()
+    3. Save
+    4. orderEventProducer.publish("OrderConfirmedEvent", new OrderConfirmedPayload(...))
+       using this order's id, customerId, items
+
+Method: rejectOrder(UUID orderId, String reason)
+  Logic:
+    1. orderRepository.findById(orderId), throw OrderNotFoundException if absent
+    2. Set status = "REJECTED", rejectionReason = reason, updatedAt = Instant.now()
+    3. Save
+    4. Do NOT publish any further event (per FR1.7 — rejection is a dead end,
+       visible only when customer next calls GET /orders/{id})
+
+--------------------------------------------------
+MODIFY: application.yml — add:
+--------------------------------------------------
+spring:
+  kafka:
+    consumer:
+      group-id: order-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] Manually publishing an InventoryReservedEvent message (matching the contract)
+    to "inventory-events" topic causes the matching order's status to become
+    "CONFIRMED" in the database within a few seconds
+[ ] Manually publishing an InventoryRejectedEvent causes the matching order's
+    status to become "REJECTED" and rejectionReason to be populated
+[ ] After confirmOrder() runs, a new OrderConfirmedEvent message appears on
+    "order-events" topic
+[ ] After rejectOrder() runs, NO new message is published to any topic
+[ ] GET /orders/{id} reflects the updated status correctly after either case
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create the 3 new event DTO classes
+2. Create InventoryEventConsumer.java
+3. Add confirmOrder() and rejectOrder() to OrderService.java
+4. Add Kafka consumer config to application.yml
+5. Test by manually producing a fake InventoryReservedEvent JSON message via
+   kafka-console-producer to the inventory-events topic, and confirming the
+   order status updates correctly
+
+
+=================================================
+TASK 1.4 — Cancellation Logic (Shared by REST endpoint AND Agent 2)
+=================================================
+
+GOAL:
+Implement ONE cancelOrder() method that both the direct REST endpoint and
+Agent 2's tool call — this must not be duplicated anywhere else.
+
+DEPENDS ON: Task 1.1, Task 1.2, Task 1.3 complete.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/order/client/ShippingServiceClient.java
+2. src/main/java/com/ecommerce/order/client/ShipmentStatusResponse.java
+3. src/main/java/com/ecommerce/order/exception/OrderCancellationNotAllowedException.java
+
+FILES TO MODIFY:
+- OrderService.java (add cancelOrder())
+- OrderController.java (add cancel endpoint)
+- application.yml (add shipping-service base URL property)
+
+--------------------------------------------------
+FILE 1: ShippingServiceClient.java
+--------------------------------------------------
+Package: com.ecommerce.order.client
+Annotations: @Component
+Constructor-inject: RestTemplate (create a @Bean for RestTemplate in a
+@Configuration class if one doesn't already exist), and inject the base
+URL via @Value("${shipping-service.base-url}")
+
+Method: getShipmentStatus(UUID orderId) -> String (nullable)
+  Logic:
+    1. Call GET {baseUrl}/shipments/{orderId}
+    2. IF response is 404 (no shipment exists yet): return null
+    3. IF response is 200: parse into ShipmentStatusResponse, return .status field
+    4. Wrap the call in try/catch for HttpClientErrorException.NotFound -> return null
+
+--------------------------------------------------
+FILE 2: ShipmentStatusResponse.java
+--------------------------------------------------
+Package: com.ecommerce.order.client
+Fields:
+- String orderId
+- String status   (expected values: "CREATED","DISPATCHED","IN_TRANSIT","DELIVERED","CANCELLED")
+
+--------------------------------------------------
+FILE 3: OrderCancellationNotAllowedException.java
+--------------------------------------------------
+Package: com.ecommerce.order.exception
+
+public class OrderCancellationNotAllowedException extends RuntimeException {
+    public OrderCancellationNotAllowedException(String message) {
+        super(message);
+    }
+}
+
+--------------------------------------------------
+MODIFY: OrderService.java — add cancelOrder()
+--------------------------------------------------
+Constructor-inject (add): ShippingServiceClient
+
+Method: cancelOrder(UUID orderId) -> OrderResponse
+  Logic:
+    1. orderRepository.findById(orderId), throw OrderNotFoundException if absent
+    2. IF order.status is "SHIPPED" or "COMPLETED":
+       throw new OrderCancellationNotAllowedException(
+         "Cannot cancel order " + orderId + ": already " + order.status)
+    3. String shipmentStatus = shippingServiceClient.getShipmentStatus(orderId)
+    4. IF shipmentStatus is null (no shipment yet): proceed to cancel (skip step 5)
+    5. IF shipmentStatus is one of "DISPATCHED","IN_TRANSIT","DELIVERED":
+       throw new OrderCancellationNotAllowedException(
+         "Cannot cancel order " + orderId + ": shipment already " + shipmentStatus)
+    6. Set order.status = "CANCELLED", previousStatus = the status before this change,
+       updatedAt = Instant.now()
+    7. Save
+    8. orderEventProducer.publish("OrderCancelledEvent", new OrderCancelledPayload(
+         orderId, items, previousStatus))
+    9. Map to OrderResponse and return it
+
+--------------------------------------------------
+MODIFY: OrderController.java — add endpoint
+--------------------------------------------------
+Endpoint: @PostMapping("/{orderId}/cancel")
+  cancelOrder(@PathVariable UUID orderId) -> ResponseEntity<OrderResponse>
+  - call orderService.cancelOrder(orderId)
+  - return ResponseEntity.ok(response)
+  - add @ExceptionHandler(OrderCancellationNotAllowedException.class) in this
+    controller, returning ResponseEntity.status(409).body(exception.getMessage())
+
+--------------------------------------------------
+MODIFY: application.yml — add:
+--------------------------------------------------
+shipping-service:
+  base-url: http://localhost:8083
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] POST /orders/{id}/cancel on a PENDING order with no shipment yet returns
+    HTTP 200, order status becomes "CANCELLED"
+[ ] After cancelling, a new OrderCancelledEvent message appears on "order-events"
+[ ] POST /orders/{id}/cancel on an order whose shipment status is "DISPATCHED"
+    (simulate by manually setting shipment status via Shipping Service's PATCH
+    endpoint first) returns HTTP 409 with a clear error message, order status
+    stays unchanged (NOT cancelled)
+[ ] POST /orders/{id}/cancel on an already-"CANCELLED" or "SHIPPED" order
+    returns HTTP 409
+[ ] This exact same cancelOrder() method is what Task 1.6's OrderCancelTool
+    calls — no separate/duplicate cancellation logic exists anywhere
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create ShipmentStatusResponse.java and ShippingServiceClient.java
+   (coordinate with Member 3 — Shipping Service's GET /shipments/{orderId}
+   endpoint must exist and be running for this to be testable end-to-end)
+2. Create OrderCancellationNotAllowedException.java
+3. Add cancelOrder() to OrderService.java
+4. Add the cancel endpoint + exception handler to OrderController.java
+5. Add shipping-service.base-url to application.yml
+6. Test manually: create an order, cancel it before any shipment exists
+   (should succeed), then test again after Shipping Service reports
+   "DISPATCHED" (should fail with 409)
+
+
+=================================================
+TASK 1.5 — AI Agent 1: Product Consultation (LangChain4j)
+=================================================
+
+GOAL:
+Set up LangChain4j and build a conversational agent that can look up product
+info from the Product & Inventory Service and answer customer questions.
+
+DEPENDS ON: Task 1.1 complete. Product & Inventory Service's
+GET /products endpoint (Member 2's Task 2.1) must exist for full testing,
+but you can stub/mock it locally if Member 2 isn't done yet.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/order/ai/config/LangChain4jConfig.java
+2. src/main/java/com/ecommerce/order/ai/tools/ProductLookupTool.java
+3. src/main/java/com/ecommerce/order/ai/agent/ProductConsultAgent.java
+4. src/main/java/com/ecommerce/order/ai/dto/ProductLookupResponse.java
+5. src/main/java/com/ecommerce/order/dto/AgentChatRequest.java
+6. src/main/java/com/ecommerce/order/dto/AgentChatResponse.java
+7. src/main/java/com/ecommerce/order/controller/AgentController.java (create now,
+   add second endpoint in Task 1.6)
+
+ADD DEPENDENCY to pom.xml (if not already present):
+<dependency>
+    <groupId>dev.langchain4j</groupId>
+    <artifactId>langchain4j-spring-boot-starter</artifactId>
+    <version>[use latest stable version compatible with your LangChain4j setup]</version>
+</dependency>
+(Also add whichever LangChain4j model-provider starter your team chooses,
+e.g. OpenAI or a local model — confirm with the team which LLM provider/API
+key you're using before this step, since it affects which starter and
+application.yml properties are needed.)
+
+--------------------------------------------------
+FILE 1: LangChain4jConfig.java
+--------------------------------------------------
+Package: com.ecommerce.order.ai.config
+Annotations: @Configuration
+
+Purpose: define the ChatLanguageModel bean (or rely on LangChain4j's Spring
+Boot auto-configuration via application.yml properties, if using the
+starter's auto-config approach — check LangChain4j docs for your chosen
+provider). If auto-configuration is used via application.yml, this class
+may only need an @Bean for AiServices.builder(...) wiring the agent
+interface to the model and the tools.
+
+Example (adjust to whichever provider is chosen):
+@Bean
+public ProductConsultAgent productConsultAgent(ChatLanguageModel model,
+                                                 ProductLookupTool tool) {
+    return AiServices.builder(ProductConsultAgent.class)
+        .chatLanguageModel(model)
+        .tools(tool)
+        .build();
+}
+
+--------------------------------------------------
+FILE 2: ProductLookupTool.java
+--------------------------------------------------
+Package: com.ecommerce.order.ai.tools
+Annotations: @Component
+Constructor-inject: RestTemplate, @Value("${product-service.base-url}") String baseUrl
+
+Method (annotate with LangChain4j's @Tool):
+  @Tool("Search for products by name or keyword and return matching products with price and stock")
+  searchProducts(String keyword) -> String
+  Logic:
+    1. Call GET {baseUrl}/products?search={keyword}
+       (confirm exact query param name with Member 2 — if Member 2's
+       endpoint doesn't support a "search" param yet, call GET /products
+       with no params and filter results in this method instead)
+    2. Parse response into a List<ProductLookupResponse>
+    3. Format as a short human-readable string, e.g.:
+       "Wireless Headphones - $79.99 - 12 in stock\nBluetooth Speaker - $49.99 - 3 in stock"
+    4. Return that string (the LLM will read this string as the tool result)
+
+--------------------------------------------------
+FILE 3: ProductConsultAgent.java (interface — LangChain4j generates the implementation)
+--------------------------------------------------
+Package: com.ecommerce.order.ai.agent
+
+public interface ProductConsultAgent {
+    @SystemMessage("You are a helpful shopping assistant for an e-commerce store. "
+        + "Use the searchProducts tool to find real product information before "
+        + "answering. Do not make up product names, prices, or stock levels.")
+    String chat(String userMessage);
+}
+
+--------------------------------------------------
+FILE 4: ProductLookupResponse.java
+--------------------------------------------------
+Package: com.ecommerce.order.ai.dto
+Fields (must match Product Service's GET /products response shape —
+confirm exact field names with Member 2 before finalizing):
+- String productId
+- String name
+- BigDecimal price
+- Integer stockQuantity
+
+--------------------------------------------------
+FILE 5: AgentChatRequest.java
+--------------------------------------------------
+Package: com.ecommerce.order.dto
+Fields:
+- String message
+
+Example JSON input:
+{ "message": "Do you have any wireless headphones under $100?" }
+
+--------------------------------------------------
+FILE 6: AgentChatResponse.java
+--------------------------------------------------
+Package: com.ecommerce.order.dto
+Fields:
+- String reply
+
+Example JSON output:
+{ "reply": "Yes! We have Wireless Headphones for $79.99, currently 12 in stock." }
+
+--------------------------------------------------
+MODIFY: application.yml — add:
+--------------------------------------------------
+product-service:
+  base-url: http://localhost:8082
+
+NOTE: ProductLookupTool (File 2 above) injects this via
+@Value("${product-service.base-url}") — without this property the app
+fails to start with "Could not resolve placeholder 'product-service.base-url'".
+This is easy to miss since Task 1.4 already added a similarly-named
+shipping-service.base-url — make sure this one gets added too.
+
+--------------------------------------------------
+FILE 7: AgentController.java
+--------------------------------------------------
+Package: com.ecommerce.order.controller
+Annotations: @RestController @RequestMapping("/agents")
+Constructor-inject: ProductConsultAgent (CancelSupportAgent added in Task 1.6)
+
+Endpoint: @PostMapping("/product-consult")
+  productConsult(@RequestBody AgentChatRequest request) -> ResponseEntity<AgentChatResponse>
+  - call productConsultAgent.chat(request.getMessage())
+  - wrap result in AgentChatResponse, return ResponseEntity.ok(response)
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] POST /agents/product-consult with a product-related question returns
+    HTTP 200 with a natural-language reply
+[ ] The reply's product names/prices match REAL data currently in the
+    Product & Inventory Service's database (verify by checking the DB
+    directly) — the agent must not hallucinate products
+[ ] If no matching product exists, the agent replies saying so rather than
+    inventing one
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Confirm with the team which LLM provider/API key you're using for
+   LangChain4j, and add the correct starter dependency + config properties
+2. Create ProductLookupResponse.java DTO (confirm field names against
+   Member 2's actual /products response)
+3. Create ProductLookupTool.java
+4. Create ProductConsultAgent.java interface
+5. Create LangChain4jConfig.java wiring the agent + tool + model
+6. Create AgentChatRequest.java, AgentChatResponse.java
+7. Create AgentController.java with the product-consult endpoint
+8. Add product-service.base-url to application.yml (see MODIFY section
+   above) — do this before step 9, or the service won't start
+9. Test with Product & Inventory Service running, seed a few test products,
+   then ask the agent about them
+
+
+=================================================
+TASK 1.6 — AI Agent 2: Cancellation Support (LangChain4j)
+=================================================
+
+GOAL:
+Build a second conversational agent that interprets a cancellation request
+and calls the SAME cancelOrder() logic from Task 1.4.
+
+DEPENDS ON: Task 1.4 and Task 1.5 complete.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/order/ai/tools/OrderCancelTool.java
+2. src/main/java/com/ecommerce/order/ai/agent/CancelSupportAgent.java
+
+FILES TO MODIFY:
+- LangChain4jConfig.java (add bean for CancelSupportAgent)
+- AgentController.java (add /agents/cancel-support endpoint)
+
+--------------------------------------------------
+FILE 1: OrderCancelTool.java
+--------------------------------------------------
+Package: com.ecommerce.order.ai.tools
+Annotations: @Component
+Constructor-inject: OrderService (the SAME OrderService from Task 1.1/1.4 —
+do not create a new/separate cancellation implementation)
+
+Method (annotate with @Tool):
+  @Tool("Cancel an order by its ID. Only works if the order hasn't shipped yet.")
+  cancelOrder(String orderId) -> String
+  Logic:
+    1. Try: orderService.cancelOrder(UUID.fromString(orderId))
+    2. On success: return "Order " + orderId + " has been successfully cancelled."
+    3. On OrderCancellationNotAllowedException: catch it, return the
+       exception's message as the tool result (so the LLM can relay it
+       naturally to the customer) — do NOT let the exception propagate
+       uncaught, since that would break the agent's response
+    4. On OrderNotFoundException: catch it, return
+       "No order found with ID " + orderId
+
+--------------------------------------------------
+FILE 2: CancelSupportAgent.java (interface)
+--------------------------------------------------
+Package: com.ecommerce.order.ai.agent
+
+public interface CancelSupportAgent {
+    @SystemMessage("You are a customer support assistant that helps customers "
+        + "cancel orders. Ask for the order ID if not provided. Use the "
+        + "cancelOrder tool to attempt cancellation, then relay the exact "
+        + "result to the customer in a friendly tone. Do not claim an order "
+        + "was cancelled unless the tool confirms it.")
+    String chat(String userMessage);
+}
+
+--------------------------------------------------
+MODIFY: LangChain4jConfig.java — add bean
+--------------------------------------------------
+@Bean
+public CancelSupportAgent cancelSupportAgent(ChatLanguageModel model,
+                                               OrderCancelTool tool) {
+    return AiServices.builder(CancelSupportAgent.class)
+        .chatLanguageModel(model)
+        .tools(tool)
+        .build();
+}
+
+--------------------------------------------------
+MODIFY: AgentController.java — add endpoint
+--------------------------------------------------
+Add CancelSupportAgent to constructor injection.
+
+Endpoint: @PostMapping("/cancel-support")
+  cancelSupport(@RequestBody AgentChatRequest request) -> ResponseEntity<AgentChatResponse>
+  - call cancelSupportAgent.chat(request.getMessage())
+  - wrap in AgentChatResponse, return ResponseEntity.ok(response)
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] POST /agents/cancel-support with a message like "Please cancel order
+    <valid-pending-order-id>" results in: the order's status actually
+    becoming "CANCELLED" in the database, AND a friendly confirmation reply
+[ ] Same request for an order that's already DISPATCHED results in: order
+    status UNCHANGED, and the agent's reply clearly states it cannot be
+    cancelled and why
+[ ] Same request for a non-existent order ID results in a reply saying
+    the order wasn't found, with no exception/500 error returned to the client
+[ ] Confirm via code review: OrderCancelTool calls orderService.cancelOrder()
+    — the exact same method used by OrderController's direct REST endpoint
+    from Task 1.4. There must be only ONE implementation of the cancellation
+    eligibility logic in the whole codebase.
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create OrderCancelTool.java, wiring it to the existing OrderService
+2. Create CancelSupportAgent.java interface
+3. Wire the new agent bean into LangChain4jConfig.java
+4. Add the /agents/cancel-support endpoint to AgentController.java
+5. Test 3 scenarios: valid cancellable order, already-dispatched order,
+   non-existent order ID — confirm correct behavior and replies for each
+
+
+=================================================
+END OF MEMBER 1 TASKS
+=================================================
