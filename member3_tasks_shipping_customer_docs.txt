@@ -781,30 +781,6 @@ Required sections:
    no real payment processing, etc. — be upfront, markers respect this)
 
 --------------------------------------------------
-DELIVERABLE 2: docs/meeting-minutes/week-XX.md (one file per week, Week 3
-through Week 11)
---------------------------------------------------
-Template for each file:
-
-# Week XX Meeting Minutes
-
-Date: [date]
-Attendance: [Member 1 name], [Member 2 name], [Member 3 name]
-
-## Progress since last meeting
-- Member 1: ...
-- Member 2: ...
-- Member 3: ...
-
-## Discussion / Decisions
-- ...
-
-## Action items for next week
-- [ ] Member 1: ...
-- [ ] Member 2: ...
-- [ ] Member 3: ...
-
---------------------------------------------------
 ACCEPTANCE CRITERIA
 --------------------------------------------------
 [ ] README.md exists at repo root, all 8 sections present and accurate
@@ -812,17 +788,13 @@ ACCEPTANCE CRITERIA
     from the original design during coding)
 [ ] A local run following ONLY the README's steps successfully starts
     all 4 services and Kafka, with no undocumented manual steps
-[ ] One meeting-minutes file exists per week from Week 3 to Week 11
-    (9 files total), each following the template above with real content
 
 --------------------------------------------------
 IMPLEMENTATION STEPS
 --------------------------------------------------
 1. Draft README.md early (Week 3-4) with placeholder run instructions,
    update it incrementally as each service becomes runnable
-2. After each weekly meeting, fill in that week's minutes file same-day
-   while details are fresh
-3. Before final submission (Week 12), do a full clean-checkout test of
+2. Before final submission (Week 12), do a full clean-checkout test of
    the README's run instructions on a machine that hasn't run the
    project before, to catch any missing steps
 
