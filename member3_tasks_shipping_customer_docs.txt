@@ -1,0 +1,804 @@
+=================================================
+MEMBER 3 — SHIPPING SERVICE + CUSTOMER SERVICE + TESTING/DOCS
+=================================================
+
+GLOBAL CONTEXT (read before starting any task):
+- Tech stack: Java 21, Spring Boot 3.x, H2, Spring Cloud Stream / spring-kafka
+- Shipping Service database: shipping_db (base package: com.ecommerce.shipping)
+- Customer Service database: customer_db (base package: com.ecommerce.customer)
+  NOTE: These are TWO SEPARATE Spring Boot services/modules, each with their
+  own pom.xml, application.yml, and port — not one combined app.
+- Kafka topics: Shipping Service CONSUMES from "order-events" only.
+  It does NOT publish any Kafka events (confirmed decision).
+- Customer Service does NOT use Kafka at all (confirmed decision — fully
+  decoupled, plain REST CRUD only).
+- Event envelope format for messages on "order-events":
+  {
+    "eventType": "OrderConfirmedEvent",
+    "eventId": "<uuid>",
+    "timestamp": "<ISO-8601>",
+    "payload": { ... }
+  }
+- Shipping Service runs on port 8083
+- Customer Service runs on port 8084
+
+
+=================================================
+TASK 3.0 — Shared Infra: Docker Compose for Kafka
+=================================================
+
+GOAL:
+Provide the one docker-compose file the whole team needs to run Kafka +
+Zookeeper locally. Every other member's Kafka producer/consumer task
+(Member 1's Task 1.2/1.3, Member 2's Task 2.2/2.3, this file's Task 3.2)
+assumes a broker is already reachable at localhost:9092 — none of those
+task files actually create it. Do this FIRST, before anyone starts
+Kafka-dependent testing, not at the end alongside the README.
+
+DEPENDS ON: nothing — this has no code dependencies and should be done
+in Week 1-2, in parallel with everyone's Task X.1 (REST-only, no Kafka).
+
+--------------------------------------------------
+DELIVERABLE
+--------------------------------------------------
+File: docker-compose.yml (repo root)
+
+Minimum services:
+- zookeeper (e.g. confluentinc/cp-zookeeper or bitnami/zookeeper image)
+- kafka (e.g. confluentinc/cp-kafka or bitnami/kafka image), advertised
+  listener reachable as localhost:9092 from the host machine (this is
+  what every service's application.yml bootstrap-servers points at)
+
+Also create the topics used by the system so services don't rely on
+auto-create (auto-create is fine for local dev, but listing them here
+makes the contract explicit):
+- "order-events"
+- "inventory-events"
+
+This can be done either via a kafka-init/kafka-setup one-shot container
+in the compose file, or documented as a manual
+`kafka-topics --create --topic ... --bootstrap-server localhost:9092`
+step in the README (Task 3.6) — pick whichever the team finds simpler.
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] `docker-compose up -d` from repo root starts Zookeeper + Kafka with
+    no manual config editing
+[ ] A local `kafka-console-consumer --topic order-events
+    --bootstrap-server localhost:9092` can connect immediately after
+    `docker-compose up`
+[ ] Any teammate can run this on a clean checkout without pre-existing
+    Kafka state on their machine
+[ ] docker-compose.yml is committed to the repo root
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Pick a Kafka image/compose template (Confluent or Bitnami both work
+   fine for local dev)
+2. Write docker-compose.yml with zookeeper + kafka services, port 9092
+   exposed to the host
+3. Test: `docker-compose up -d`, then use kafka-console-producer/consumer
+   to send and read a test message on a throwaway topic
+4. Create the "order-events" and "inventory-events" topics (or confirm
+   auto-create is enabled and document that choice)
+5. Share the working docker-compose.yml with the team immediately —
+   Member 1's Task 1.2 and Member 2's Task 2.2 both need it to test
+
+
+=================================================
+TASK 3.1 — Shipment Entity, Repository, and Status REST Endpoints
+=================================================
+
+GOAL:
+Set up Shipping Service's data layer and expose endpoints to view and
+update shipment status.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/shipping/entity/Shipment.java
+2. src/main/java/com/ecommerce/shipping/repository/ShipmentRepository.java
+3. src/main/java/com/ecommerce/shipping/dto/ShipmentResponse.java
+4. src/main/java/com/ecommerce/shipping/dto/UpdateShipmentStatusRequest.java
+5. src/main/java/com/ecommerce/shipping/exception/ShipmentNotFoundException.java
+6. src/main/java/com/ecommerce/shipping/exception/InvalidShipmentStatusException.java
+7. src/main/java/com/ecommerce/shipping/service/ShipmentService.java
+8. src/main/java/com/ecommerce/shipping/controller/ShipmentController.java
+
+--------------------------------------------------
+FILE 1: Shipment.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.entity
+Annotations: @Entity, @Table(name = "shipments")
+
+Fields:
+| Field name  | Java type | Column annotation                          |
+|-------------|-----------|-----------------------------------------------|
+| id          | UUID      | @Id @GeneratedValue                              |
+| orderId     | UUID      | @Column(name="order_id", nullable=false, unique=true) |
+| status      | String    | @Column(nullable=false) — values: "CREATED","DISPATCHED","IN_TRANSIT","DELIVERED","CANCELLED" |
+| createdAt   | Instant   | @Column(name="created_at", nullable=false)       |
+| updatedAt   | Instant   | @Column(name="updated_at", nullable=false)       |
+
+NOTE: orderId is UNIQUE — one shipment per order in this project's scope
+(no split shipments).
+
+--------------------------------------------------
+FILE 2: ShipmentRepository.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.repository
+
+public interface ShipmentRepository extends JpaRepository<Shipment, UUID> {
+    Optional<Shipment> findByOrderId(UUID orderId);
+}
+
+--------------------------------------------------
+FILE 3: ShipmentResponse.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.dto
+Fields:
+- String orderId
+- String status
+
+Example JSON output:
+{ "orderId": "f47ac10b-0000-0000-0000-000000000099", "status": "CREATED" }
+
+NOTE: This exact shape is what Member 1's ShippingServiceClient expects
+from GET /shipments/{orderId} — do not rename these fields without telling
+Member 1.
+
+--------------------------------------------------
+FILE 4: UpdateShipmentStatusRequest.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.dto
+Fields:
+- String status
+
+Example JSON input:
+{ "status": "DISPATCHED" }
+
+--------------------------------------------------
+FILE 5: ShipmentNotFoundException.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.exception
+
+public class ShipmentNotFoundException extends RuntimeException {
+    public ShipmentNotFoundException(UUID orderId) {
+        super("No shipment found for order: " + orderId);
+    }
+}
+
+--------------------------------------------------
+FILE 6: InvalidShipmentStatusException.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.exception
+
+public class InvalidShipmentStatusException extends RuntimeException {
+    public InvalidShipmentStatusException(String message) {
+        super(message);
+    }
+}
+
+--------------------------------------------------
+FILE 7: ShipmentService.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.service
+Constructor-inject: ShipmentRepository
+
+Method 1: getShipmentByOrderId(UUID orderId) -> ShipmentResponse
+  Logic:
+    1. shipmentRepository.findByOrderId(orderId)
+    2. If empty, throw new ShipmentNotFoundException(orderId)
+       (this will become a 404, which Member 1's client treats as
+       "no shipment yet" — this is expected/correct behavior, not a bug)
+    3. Map to ShipmentResponse, return
+
+Method 2: updateStatus(UUID orderId, String newStatus) -> ShipmentResponse
+  Logic:
+    1. shipmentRepository.findByOrderId(orderId), throw
+       ShipmentNotFoundException if absent
+    2. Validate newStatus is one of: "CREATED","DISPATCHED","IN_TRANSIT",
+       "DELIVERED","CANCELLED" — else throw InvalidShipmentStatusException(
+       "Unknown status: " + newStatus)
+    3. Set shipment.status = newStatus, updatedAt = Instant.now()
+    4. Save, map to ShipmentResponse, return
+    (No transition-order validation required for this project's scope —
+    e.g., you CAN jump straight from CREATED to DELIVERED manually via this
+    endpoint for testing purposes. Keep it simple.)
+
+Method 3 (used internally by Task 3.2's Kafka consumer):
+  createShipment(UUID orderId) -> Shipment
+  Logic:
+    1. Create new Shipment: id=random UUID, orderId=orderId, status="CREATED",
+       createdAt=updatedAt=Instant.now()
+    2. Save and return the entity
+
+Method 4 (used internally by Task 3.2's Kafka consumer):
+  cancelIfNotDispatched(UUID orderId) -> void
+  Logic:
+    1. shipmentRepository.findByOrderId(orderId)
+    2. IF not found: do nothing (log at info level — order was cancelled
+       before any shipment existed, which is a normal/expected case)
+    3. IF found AND status == "CREATED": set status = "CANCELLED", save
+    4. IF found AND status is anything else (DISPATCHED, IN_TRANSIT,
+       DELIVERED): do nothing, log a warning (this shouldn't normally
+       happen since Member 1's cancelOrder() checks shipment status
+       first, but this method must not throw an exception — Kafka
+       consumers should not crash on this case)
+
+--------------------------------------------------
+FILE 8: ShipmentController.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.controller
+Annotations: @RestController @RequestMapping("/shipments")
+Constructor-inject: ShipmentService
+
+Endpoint 1: @GetMapping("/{orderId}")
+  getShipment(@PathVariable UUID orderId) -> ResponseEntity<ShipmentResponse>
+  - return ResponseEntity.ok(shipmentService.getShipmentByOrderId(orderId))
+  - add @ExceptionHandler(ShipmentNotFoundException.class) returning
+    ResponseEntity.status(404).body(exception.getMessage())
+
+Endpoint 2: @PatchMapping("/{orderId}/status")
+  updateStatus(@PathVariable UUID orderId,
+               @RequestBody UpdateShipmentStatusRequest request)
+    -> ResponseEntity<ShipmentResponse>
+  - return ResponseEntity.ok(shipmentService.updateStatus(orderId, request.getStatus()))
+  - add @ExceptionHandler(InvalidShipmentStatusException.class) returning
+    ResponseEntity.status(400).body(exception.getMessage())
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] GET /shipments/{orderId} for an order with no shipment returns HTTP 404
+    (this is the expected signal Order Service relies on for "not shipped yet")
+[ ] PATCH /shipments/{orderId}/status with {"status":"DISPATCHED"} updates
+    the row, returns HTTP 200 with the new status
+[ ] PATCH with an invalid status string (e.g. "FLYING") returns HTTP 400
+[ ] Response field names are exactly "orderId" and "status" (lowercase
+    camelCase, matching the contract Member 1 depends on)
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create Shipment.java entity
+2. Create ShipmentRepository.java
+3. Create the 2 DTOs + 2 exception classes
+4. Create ShipmentService.java (all 4 methods, even though 2 are only
+   used internally by Task 3.2 — build them now so Task 3.2 is simpler)
+5. Create ShipmentController.java (2 endpoints)
+6. Test both endpoints manually via Postman + H2 console
+
+
+=================================================
+TASK 3.2 — Kafka Consumer: React to Order Confirmed/Cancelled Events
+=================================================
+
+GOAL:
+Consume OrderConfirmedEvent to create a shipment, and OrderCancelledEvent
+to cancel a shipment if it hasn't been dispatched yet.
+
+DEPENDS ON: Task 3.0 (Kafka running) and Task 3.1 complete.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/shipping/event/dto/OrderConfirmedPayload.java
+2. src/main/java/com/ecommerce/shipping/event/dto/OrderCancelledPayload.java
+3. src/main/java/com/ecommerce/shipping/event/dto/OrderItemEventDto.java
+4. src/main/java/com/ecommerce/shipping/event/consumer/OrderEventConsumer.java
+
+FILES TO MODIFY:
+- application.yml (add Kafka consumer config)
+
+NOTE ON DUPLICATE DTOs: these are THIS SERVICE's own local copies. Field
+names must match EXACTLY what Member 1 publishes:
+  OrderConfirmedEvent payload: { orderId, customerId, items: [{productId, quantity}] }
+  OrderCancelledEvent payload: { orderId, items: [{productId, quantity}], previousStatus }
+(Shipping Service only actually needs the orderId field from either payload
+ — but define the full DTO shape anyway so parsing doesn't break if more
+ fields are added later.)
+
+--------------------------------------------------
+FILE 1: OrderConfirmedPayload.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.event.dto
+Fields: String orderId, String customerId, List<OrderItemEventDto> items
+
+--------------------------------------------------
+FILE 2: OrderCancelledPayload.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.event.dto
+Fields: String orderId, List<OrderItemEventDto> items, String previousStatus
+
+--------------------------------------------------
+FILE 3: OrderItemEventDto.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.event.dto
+Fields: String productId, Integer quantity
+
+--------------------------------------------------
+FILE 4: OrderEventConsumer.java
+--------------------------------------------------
+Package: com.ecommerce.shipping.event.consumer
+Annotations: @Component
+Constructor-inject: ShipmentService, ObjectMapper
+
+Method: @KafkaListener(topics = "order-events", groupId = "shipping-service")
+  onMessage(String rawMessage)
+  Logic:
+    1. Parse rawMessage to read "eventType" field
+    2. IF eventType == "OrderConfirmedEvent":
+       - parse payload into OrderConfirmedPayload
+       - call shipmentService.createShipment(UUID.fromString(payload.orderId))
+    3. IF eventType == "OrderCancelledEvent":
+       - parse payload into OrderCancelledPayload
+       - call shipmentService.cancelIfNotDispatched(UUID.fromString(payload.orderId))
+    4. IF eventType is anything else ("OrderCreatedEvent", "OrderRejectedEvent"):
+       ignore (this service does not act on those)
+
+--------------------------------------------------
+MODIFY: application.yml — add:
+--------------------------------------------------
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: shipping-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] Publishing an OrderConfirmedEvent (matching the contract) creates a new
+    shipment row with status="CREATED" for that orderId
+[ ] Publishing a second OrderConfirmedEvent for the SAME orderId does not
+    crash (decide: either ignore duplicates, or let it fail gracefully —
+    document whichever behavior you chose as a code comment)
+[ ] Publishing an OrderCancelledEvent for an order whose shipment is still
+    "CREATED" updates that shipment's status to "CANCELLED"
+[ ] Publishing an OrderCancelledEvent for an order with NO shipment at all
+    does not throw an exception or crash the consumer
+[ ] GET /shipments/{orderId} reflects all of the above changes correctly
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create the 3 event DTO classes (match Member 1's contract exactly)
+2. Create OrderEventConsumer.java
+3. Add Kafka consumer config to application.yml
+4. Test: manually publish an OrderConfirmedEvent JSON to the "order-events"
+   topic via kafka-console-producer, verify a shipment is created; then
+   publish an OrderCancelledEvent for the same orderId, verify it cancels
+
+
+=================================================
+TASK 3.3 — Customer Entity, Repository, and Profile CRUD Endpoints
+=================================================
+
+GOAL:
+Set up Customer Service (a completely separate Spring Boot module from
+Shipping Service) with profile CRUD. No Kafka involved anywhere in this
+service.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/customer/entity/Customer.java
+2. src/main/java/com/ecommerce/customer/repository/CustomerRepository.java
+3. src/main/java/com/ecommerce/customer/dto/CreateCustomerRequest.java
+4. src/main/java/com/ecommerce/customer/dto/UpdateCustomerRequest.java
+5. src/main/java/com/ecommerce/customer/dto/CustomerResponse.java
+6. src/main/java/com/ecommerce/customer/exception/CustomerNotFoundException.java
+7. src/main/java/com/ecommerce/customer/service/CustomerService.java
+8. src/main/java/com/ecommerce/customer/controller/CustomerController.java
+
+--------------------------------------------------
+FILE 1: Customer.java
+--------------------------------------------------
+Package: com.ecommerce.customer.entity
+Annotations: @Entity, @Table(name = "customers")
+
+Fields:
+| Field name  | Java type | Column annotation                       |
+|-------------|-----------|--------------------------------------------|
+| id          | UUID      | @Id @GeneratedValue                          |
+| name        | String    | @Column(nullable=false)                      |
+| email       | String    | @Column(nullable=false, unique=true)         |
+| createdAt   | Instant   | @Column(name="created_at", nullable=false)   |
+
+--------------------------------------------------
+FILE 2: CustomerRepository.java
+--------------------------------------------------
+Package: com.ecommerce.customer.repository
+
+public interface CustomerRepository extends JpaRepository<Customer, UUID> {
+}
+
+--------------------------------------------------
+FILE 3: CreateCustomerRequest.java
+--------------------------------------------------
+Package: com.ecommerce.customer.dto
+Fields: String name, String email
+
+Example JSON input:
+{ "name": "Jane Doe", "email": "jane@example.com" }
+
+--------------------------------------------------
+FILE 4: UpdateCustomerRequest.java
+--------------------------------------------------
+Package: com.ecommerce.customer.dto
+Fields (nullable/optional): String name, String email
+
+--------------------------------------------------
+FILE 5: CustomerResponse.java
+--------------------------------------------------
+Package: com.ecommerce.customer.dto
+Fields: UUID customerId, String name, String email
+
+Example JSON output:
+{
+  "customerId": "a1b2c3d4-0000-0000-0000-000000000001",
+  "name": "Jane Doe",
+  "email": "jane@example.com"
+}
+
+--------------------------------------------------
+FILE 6: CustomerNotFoundException.java
+--------------------------------------------------
+Package: com.ecommerce.customer.exception
+
+public class CustomerNotFoundException extends RuntimeException {
+    public CustomerNotFoundException(UUID customerId) {
+        super("Customer not found: " + customerId);
+    }
+}
+
+--------------------------------------------------
+FILE 7: CustomerService.java
+--------------------------------------------------
+Package: com.ecommerce.customer.service
+Constructor-inject: CustomerRepository
+
+Method 1: createCustomer(CreateCustomerRequest request) -> CustomerResponse
+  Logic: create Customer(id=random UUID, name, email, createdAt=Instant.now()),
+  save, map to CustomerResponse, return
+
+Method 2: getCustomer(UUID customerId) -> CustomerResponse
+  Logic: find by id, throw CustomerNotFoundException if absent, map, return
+
+Method 3: updateCustomer(UUID customerId, UpdateCustomerRequest request) -> CustomerResponse
+  Logic: find by id, throw if absent, overwrite non-null fields from request,
+  save, map, return
+
+--------------------------------------------------
+FILE 8: CustomerController.java
+--------------------------------------------------
+Package: com.ecommerce.customer.controller
+Annotations: @RestController @RequestMapping("/customers")
+Constructor-inject: CustomerService
+
+Endpoint 1: @PostMapping
+  createCustomer(@RequestBody CreateCustomerRequest request) -> ResponseEntity<CustomerResponse>
+  - return ResponseEntity.status(201).body(customerService.createCustomer(request))
+
+Endpoint 2: @GetMapping("/{customerId}")
+  getCustomer(@PathVariable UUID customerId) -> ResponseEntity<CustomerResponse>
+  - return ResponseEntity.ok(customerService.getCustomer(customerId))
+  - add @ExceptionHandler(CustomerNotFoundException.class) returning
+    ResponseEntity.status(404).body(exception.getMessage())
+
+Endpoint 3: @PutMapping("/{customerId}")
+  updateCustomer(@PathVariable UUID customerId, @RequestBody UpdateCustomerRequest request)
+    -> ResponseEntity<CustomerResponse>
+  - return ResponseEntity.ok(customerService.updateCustomer(customerId, request))
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] POST /customers creates a customer, returns 201
+[ ] Creating a second customer with a duplicate email returns an error
+    (H2 unique constraint violation is acceptable — return HTTP 400 or 409
+    with a readable message; add a @ExceptionHandler for
+    DataIntegrityViolationException if needed)
+[ ] GET /customers/{invalidId} returns 404
+[ ] PUT /customers/{id} updates only provided fields
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create Customer.java entity
+2. Create CustomerRepository.java
+3. Create the 3 DTOs + exception class
+4. Create CustomerService.java
+5. Create CustomerController.java
+6. Test via Postman + H2 console
+
+
+=================================================
+TASK 3.4 — Feedback and Complaint Entities + Endpoints
+=================================================
+
+GOAL:
+Add feedback submission and complaint tracking to Customer Service.
+
+DEPENDS ON: Task 3.3 complete.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/customer/entity/Feedback.java
+2. src/main/java/com/ecommerce/customer/entity/Complaint.java
+3. src/main/java/com/ecommerce/customer/repository/FeedbackRepository.java
+4. src/main/java/com/ecommerce/customer/repository/ComplaintRepository.java
+5. src/main/java/com/ecommerce/customer/dto/CreateFeedbackRequest.java
+6. src/main/java/com/ecommerce/customer/dto/FeedbackResponse.java
+7. src/main/java/com/ecommerce/customer/dto/CreateComplaintRequest.java
+8. src/main/java/com/ecommerce/customer/dto/ComplaintResponse.java
+
+FILES TO MODIFY:
+- CustomerService.java (add feedback/complaint methods)
+- CustomerController.java (add feedback/complaint endpoints)
+
+--------------------------------------------------
+FILE 1: Feedback.java
+--------------------------------------------------
+Package: com.ecommerce.customer.entity
+Annotations: @Entity, @Table(name = "feedback")
+
+Fields:
+| Field name  | Java type | Column annotation                          |
+|-------------|-----------|-----------------------------------------------|
+| id          | UUID      | @Id @GeneratedValue                             |
+| customerId  | UUID      | @Column(name="customer_id", nullable=false)     |
+| content     | String    | @Column(nullable=false)                         |
+| rating      | Integer   | @Column(nullable=true)                          |
+| createdAt   | Instant   | @Column(name="created_at", nullable=false)      |
+
+--------------------------------------------------
+FILE 2: Complaint.java
+--------------------------------------------------
+Package: com.ecommerce.customer.entity
+Annotations: @Entity, @Table(name = "complaints")
+
+Fields:
+| Field name  | Java type | Column annotation                          |
+|-------------|-----------|-----------------------------------------------|
+| id          | UUID      | @Id @GeneratedValue                             |
+| customerId  | UUID      | @Column(name="customer_id", nullable=false)     |
+| content     | String    | @Column(nullable=false)                         |
+| status      | String    | @Column(nullable=false) — "OPEN" or "RESOLVED"  |
+| createdAt   | Instant   | @Column(name="created_at", nullable=false)      |
+
+--------------------------------------------------
+FILE 3: FeedbackRepository.java
+--------------------------------------------------
+Package: com.ecommerce.customer.repository
+
+public interface FeedbackRepository extends JpaRepository<Feedback, UUID> {
+    List<Feedback> findByCustomerId(UUID customerId);
+}
+
+--------------------------------------------------
+FILE 4: ComplaintRepository.java
+--------------------------------------------------
+Package: com.ecommerce.customer.repository
+
+public interface ComplaintRepository extends JpaRepository<Complaint, UUID> {
+    List<Complaint> findByCustomerId(UUID customerId);
+}
+
+--------------------------------------------------
+FILE 5: CreateFeedbackRequest.java
+--------------------------------------------------
+Package: com.ecommerce.customer.dto
+Fields: String content, Integer rating (nullable)
+
+--------------------------------------------------
+FILE 6: FeedbackResponse.java
+--------------------------------------------------
+Package: com.ecommerce.customer.dto
+Fields: UUID feedbackId, String content, Integer rating, String createdAt
+
+--------------------------------------------------
+FILE 7: CreateComplaintRequest.java
+--------------------------------------------------
+Package: com.ecommerce.customer.dto
+Fields: String content
+
+--------------------------------------------------
+FILE 8: ComplaintResponse.java
+--------------------------------------------------
+Package: com.ecommerce.customer.dto
+Fields: UUID complaintId, String content, String status, String createdAt
+
+--------------------------------------------------
+MODIFY: CustomerService.java — add 4 methods
+--------------------------------------------------
+Constructor-inject (add): FeedbackRepository, ComplaintRepository
+
+Method: submitFeedback(UUID customerId, CreateFeedbackRequest request) -> FeedbackResponse
+  Logic: verify customer exists (throw CustomerNotFoundException if not),
+  create Feedback(id=random UUID, customerId, content, rating,
+  createdAt=Instant.now()), save, map, return
+
+Method: submitComplaint(UUID customerId, CreateComplaintRequest request) -> ComplaintResponse
+  Logic: verify customer exists, create Complaint(id=random UUID, customerId,
+  content, status="OPEN", createdAt=Instant.now()), save, map, return
+
+Method: getComplaintsByCustomer(UUID customerId) -> List<ComplaintResponse>
+  Logic: complaintRepository.findByCustomerId(customerId), map each, return
+  (empty list allowed)
+
+--------------------------------------------------
+MODIFY: CustomerController.java — add 3 endpoints
+--------------------------------------------------
+Endpoint: @PostMapping("/{customerId}/feedback")
+  submitFeedback(@PathVariable UUID customerId, @RequestBody CreateFeedbackRequest request)
+    -> ResponseEntity<FeedbackResponse>
+  - return ResponseEntity.status(201).body(customerService.submitFeedback(customerId, request))
+
+Endpoint: @PostMapping("/{customerId}/complaints")
+  submitComplaint(@PathVariable UUID customerId, @RequestBody CreateComplaintRequest request)
+    -> ResponseEntity<ComplaintResponse>
+  - return ResponseEntity.status(201).body(customerService.submitComplaint(customerId, request))
+
+Endpoint: @GetMapping("/{customerId}/complaints")
+  getComplaints(@PathVariable UUID customerId) -> ResponseEntity<List<ComplaintResponse>>
+  - return ResponseEntity.ok(customerService.getComplaintsByCustomer(customerId))
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] POST /customers/{id}/feedback for a valid customer returns 201
+[ ] POST /customers/{id}/feedback for a non-existent customer returns 404
+[ ] POST /customers/{id}/complaints creates a complaint with status="OPEN"
+[ ] GET /customers/{id}/complaints returns all complaints for that customer
+    (empty array if none, not an error)
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create Feedback.java and Complaint.java entities
+2. Create the 2 repositories
+3. Create the 4 DTOs
+4. Add the 3 new methods to CustomerService.java
+5. Add the 3 new endpoints to CustomerController.java
+6. Test via Postman + H2 console
+
+
+=================================================
+TASK 3.5 — Postman Collection
+=================================================
+
+GOAL:
+Build one Postman collection covering every REST endpoint across all 4
+services, organized into folders per service, so the whole team (and
+markers) can test the system without writing requests from scratch.
+
+DEPENDS ON: All other members' REST endpoints should exist (at least in
+skeleton form) before finalizing this — build incrementally as endpoints
+become available rather than waiting until the very end.
+
+--------------------------------------------------
+DELIVERABLE
+--------------------------------------------------
+File: postman/ecommerce-platform.postman_collection.json
+
+Structure (folders, one per service):
+- Order Service
+  - Create Order (POST {{orderServiceUrl}}/orders)
+  - Get Order (GET {{orderServiceUrl}}/orders/:orderId)
+  - Get Orders by Customer (GET {{orderServiceUrl}}/orders?customerId=:customerId)
+  - Cancel Order (POST {{orderServiceUrl}}/orders/:orderId/cancel)
+  - Agent - Product Consult (POST {{orderServiceUrl}}/agents/product-consult)
+  - Agent - Cancel Support (POST {{orderServiceUrl}}/agents/cancel-support)
+- Product & Inventory Service
+  - Create Product (POST {{inventoryServiceUrl}}/products)
+  - Update Product (PUT {{inventoryServiceUrl}}/products/:productId)
+  - Delete Product (DELETE {{inventoryServiceUrl}}/products/:productId)
+  - List/Search Products (GET {{inventoryServiceUrl}}/products?search=)
+  - Get Product (GET {{inventoryServiceUrl}}/products/:productId)
+  - Low Stock Report (GET {{inventoryServiceUrl}}/analytics/low-stock?threshold=)
+  - Revenue Report (GET {{inventoryServiceUrl}}/analytics/revenue)
+- Shipping Service
+  - Get Shipment (GET {{shippingServiceUrl}}/shipments/:orderId)
+  - Update Shipment Status (PATCH {{shippingServiceUrl}}/shipments/:orderId/status)
+- Customer Service
+  - Create Customer (POST {{customerServiceUrl}}/customers)
+  - Get Customer (GET {{customerServiceUrl}}/customers/:customerId)
+  - Update Customer (PUT {{customerServiceUrl}}/customers/:customerId)
+  - Submit Feedback (POST {{customerServiceUrl}}/customers/:customerId/feedback)
+  - Submit Complaint (POST {{customerServiceUrl}}/customers/:customerId/complaints)
+  - Get Complaints (GET {{customerServiceUrl}}/customers/:customerId/complaints)
+
+--------------------------------------------------
+SETUP INSTRUCTIONS
+--------------------------------------------------
+1. Create a Postman Environment named "Local" with these variables:
+   orderServiceUrl = http://localhost:8081
+   inventoryServiceUrl = http://localhost:8082
+   shippingServiceUrl = http://localhost:8083
+   customerServiceUrl = http://localhost:8084
+2. For every request, use {{variableName}} in the URL instead of hardcoding
+   "localhost:8081" etc., so the collection works for anyone on the team
+3. For each POST/PUT/PATCH request, include a realistic example JSON body
+   in Postman's Body tab (use the exact example JSON shown in each
+   member's task file above for that endpoint)
+4. For endpoints that need a resolved ID (e.g., Cancel Order needs a real
+   orderId), use Postman's "Tests" tab on the Create request to save the
+   returned ID into a collection/environment variable
+   (pm.environment.set("lastOrderId", pm.response.json().orderId);),
+   then reference {{lastOrderId}} in later requests — this lets the whole
+   collection be run top-to-bottom via "Run Collection" without manual
+   copy-pasting of IDs
+5. Export the finished collection as JSON and commit it to the repo at
+   postman/ecommerce-platform.postman_collection.json
+   Also export the environment to postman/local.postman_environment.json
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] Every endpoint listed above exists in the collection
+[ ] Running the whole collection top-to-bottom (Postman's "Run Collection")
+    completes without manual intervention, using chained variables for IDs
+[ ] Collection uses environment variables for all base URLs, no hardcoded
+    localhost ports
+[ ] Both the collection JSON and environment JSON are committed to the repo
+
+
+=================================================
+TASK 3.6 — README and Meeting Minutes
+=================================================
+
+GOAL:
+Maintain project documentation: a top-level README for setup/run
+instructions, and weekly meeting minutes from Week 3 to Week 11.
+
+--------------------------------------------------
+DELIVERABLE 1: README.md (repo root)
+--------------------------------------------------
+Required sections:
+1. Project overview (1-2 paragraphs, based on the presentation script's
+   intro — "AI-powered E-commerce & Logistics platform")
+2. Architecture diagram (can reuse/re-draw the diagram from the design
+   discussion — services, Kafka topics, event flow)
+3. Tech stack list
+4. Prerequisites (Java 21, Docker for Kafka, Maven, etc.)
+5. How to run locally, step by step:
+   - Start Kafka: `docker-compose up -d` (see Task 3.0's docker-compose.yml)
+   - Start each of the 4 services in order (which order matters least
+     since Kafka decouples them, but note the ports: 8081/8082/8083/8084)
+   - How to access the H2 console for each service
+6. How to import and run the Postman collection (link to Task 3.5's files)
+7. Kafka topics reference table (topic name, publisher, consumers, event
+   types) — copy from the finalized event contracts
+8. Known limitations / out-of-scope items (no return flow, no auth,
+   no real payment processing, etc. — be upfront, markers respect this)
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] README.md exists at repo root, all 8 sections present and accurate
+    to the actual final implementation (update it if anything changed
+    from the original design during coding)
+[ ] A local run following ONLY the README's steps successfully starts
+    all 4 services and Kafka, with no undocumented manual steps
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Draft README.md early (Week 3-4) with placeholder run instructions,
+   update it incrementally as each service becomes runnable
+2. Before final submission (Week 12), do a full clean-checkout test of
+   the README's run instructions on a machine that hasn't run the
+   project before, to catch any missing steps
+
+
+=================================================
+END OF MEMBER 3 TASKS
+=================================================

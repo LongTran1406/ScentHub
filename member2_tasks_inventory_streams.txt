@@ -1,0 +1,643 @@
+=================================================
+MEMBER 2 — PRODUCT & INVENTORY SERVICE + STREAM PROCESSING
+=================================================
+
+GLOBAL CONTEXT (read before starting any task):
+- Tech stack: Java 21, Spring Boot 3.x, H2, Spring Cloud Stream / spring-kafka,
+  Kafka Streams
+- This service's own database: inventory_db
+- Base package: com.ecommerce.inventory
+- Kafka topics used: "order-events" (this service CONSUMES from it),
+  "inventory-events" (this service PUBLISHES to it)
+- Event envelope format for ALL Kafka messages (both topics):
+  {
+    "eventType": "OrderCreatedEvent",
+    "eventId": "<uuid>",
+    "timestamp": "<ISO-8601>",
+    "payload": { ... }
+  }
+- This service runs on port 8082
+- IMPORTANT: "available stock" = stock_quantity - reserved_quantity.
+  Reserving = increment reserved_quantity. Releasing (on cancel) = decrement it.
+  stock_quantity itself is never changed by these flows in this project's scope.
+
+
+=================================================
+TASK 2.1 — Product Entity, Repository, CRUD + Browse REST Endpoints
+=================================================
+
+GOAL:
+Set up the product data layer and expose CRUD + browse/search endpoints.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/inventory/entity/Product.java
+2. src/main/java/com/ecommerce/inventory/repository/ProductRepository.java
+3. src/main/java/com/ecommerce/inventory/dto/CreateProductRequest.java
+4. src/main/java/com/ecommerce/inventory/dto/UpdateProductRequest.java
+5. src/main/java/com/ecommerce/inventory/dto/ProductResponse.java
+6. src/main/java/com/ecommerce/inventory/exception/ProductNotFoundException.java
+7. src/main/java/com/ecommerce/inventory/service/ProductService.java
+8. src/main/java/com/ecommerce/inventory/controller/ProductController.java
+
+--------------------------------------------------
+FILE 1: Product.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.entity
+Annotations: @Entity, @Table(name = "products")
+
+Fields:
+| Field name        | Java type   | Column annotation                              |
+|-------------------|-------------|---------------------------------------------------|
+| id                | UUID        | @Id @GeneratedValue                                 |
+| name              | String      | @Column(nullable=false)                             |
+| description       | String      | @Column                                             |
+| price             | BigDecimal  | @Column(nullable=false)                             |
+| stockQuantity     | Integer     | @Column(name="stock_quantity", nullable=false)      |
+| reservedQuantity  | Integer     | @Column(name="reserved_quantity", nullable=false), default 0 |
+| createdAt         | Instant     | @Column(name="created_at", nullable=false)          |
+| updatedAt         | Instant     | @Column(name="updated_at", nullable=false)          |
+
+--------------------------------------------------
+FILE 2: ProductRepository.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.repository
+
+public interface ProductRepository extends JpaRepository<Product, UUID> {
+    List<Product> findByNameContainingIgnoreCase(String keyword);
+}
+
+--------------------------------------------------
+FILE 3: CreateProductRequest.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.dto
+Fields:
+- String name
+- String description
+- BigDecimal price
+- Integer stockQuantity
+
+Example JSON input:
+{
+  "name": "Wireless Headphones",
+  "description": "Noise-cancelling over-ear headphones",
+  "price": 79.99,
+  "stockQuantity": 50
+}
+
+--------------------------------------------------
+FILE 4: UpdateProductRequest.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.dto
+Fields (all optional/nullable — only update fields that are provided):
+- String name
+- String description
+- BigDecimal price
+- Integer stockQuantity
+
+--------------------------------------------------
+FILE 5: ProductResponse.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.dto
+Fields:
+- UUID productId
+- String name
+- String description
+- BigDecimal price
+- Integer stockQuantity
+- Integer reservedQuantity
+- Integer availableQuantity   (computed as stockQuantity - reservedQuantity, NOT a DB column)
+
+Example JSON output:
+{
+  "productId": "b2c3d4e5-0000-0000-0000-000000000002",
+  "name": "Wireless Headphones",
+  "description": "Noise-cancelling over-ear headphones",
+  "price": 79.99,
+  "stockQuantity": 50,
+  "reservedQuantity": 5,
+  "availableQuantity": 45
+}
+
+--------------------------------------------------
+FILE 6: ProductNotFoundException.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.exception
+
+public class ProductNotFoundException extends RuntimeException {
+    public ProductNotFoundException(UUID productId) {
+        super("Product not found: " + productId);
+    }
+}
+
+--------------------------------------------------
+FILE 7: ProductService.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.service
+Constructor-inject: ProductRepository
+
+Method 1: createProduct(CreateProductRequest request) -> ProductResponse
+  Logic:
+    1. Create Product: id=random UUID, name/description/price/stockQuantity from
+       request, reservedQuantity=0, createdAt=updatedAt=Instant.now()
+    2. Save, map to ProductResponse (availableQuantity = stockQuantity - 0), return
+
+Method 2: updateProduct(UUID productId, UpdateProductRequest request) -> ProductResponse
+  Logic:
+    1. Find by id, throw ProductNotFoundException if absent
+    2. For each non-null field in request, overwrite the corresponding entity field
+    3. Set updatedAt = Instant.now(), save, map to ProductResponse, return
+
+Method 3: deleteProduct(UUID productId) -> void
+  Logic:
+    1. If not exists, throw ProductNotFoundException
+    2. productRepository.deleteById(productId)
+
+Method 4: listProducts(String searchKeyword) -> List<ProductResponse>
+  Logic:
+    1. IF searchKeyword is null or blank: productRepository.findAll()
+    2. ELSE: productRepository.findByNameContainingIgnoreCase(searchKeyword)
+    3. Map each to ProductResponse (compute availableQuantity for each), return list
+
+Method 5: getProduct(UUID productId) -> ProductResponse
+  Logic:
+    1. Find by id, throw ProductNotFoundException if absent
+    2. Map to ProductResponse, return
+
+--------------------------------------------------
+FILE 8: ProductController.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.controller
+Annotations: @RestController @RequestMapping("/products")
+Constructor-inject: ProductService
+
+Endpoint 1: @PostMapping
+  createProduct(@RequestBody CreateProductRequest request) -> ResponseEntity<ProductResponse>
+  - return ResponseEntity.status(201).body(productService.createProduct(request))
+
+Endpoint 2: @PutMapping("/{productId}")
+  updateProduct(@PathVariable UUID productId, @RequestBody UpdateProductRequest request)
+    -> ResponseEntity<ProductResponse>
+  - return ResponseEntity.ok(productService.updateProduct(productId, request))
+
+Endpoint 3: @DeleteMapping("/{productId}")
+  deleteProduct(@PathVariable UUID productId) -> ResponseEntity<Void>
+  - productService.deleteProduct(productId)
+  - return ResponseEntity.noContent().build()
+
+Endpoint 4: @GetMapping
+  listProducts(@RequestParam(required=false) String search) -> ResponseEntity<List<ProductResponse>>
+  - return ResponseEntity.ok(productService.listProducts(search))
+  - NOTE: this is the endpoint Member 1's ProductLookupTool (Agent 1) calls,
+    using the query param name "search" — do not rename this param without
+    telling Member 1
+
+Endpoint 5: @GetMapping("/{productId}")
+  getProduct(@PathVariable UUID productId) -> ResponseEntity<ProductResponse>
+  - return ResponseEntity.ok(productService.getProduct(productId))
+  - add @ExceptionHandler(ProductNotFoundException.class) returning
+    ResponseEntity.status(404).body(exception.getMessage())
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] POST /products creates a product, returns 201 with ProductResponse,
+    availableQuantity = stockQuantity on creation
+[ ] PUT /products/{id} updates only the fields provided, leaves others unchanged
+[ ] DELETE /products/{id} removes the row, returns 204
+[ ] GET /products returns all products; GET /products?search=phone returns only
+    name-matching products (case-insensitive)
+[ ] GET /products/{invalidId} returns 404
+[ ] availableQuantity is always computed as stockQuantity - reservedQuantity,
+    never stored as its own column
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create Product.java entity
+2. Create ProductRepository.java
+3. Create the 3 DTOs + ProductNotFoundException.java
+4. Create ProductService.java (5 methods)
+5. Create ProductController.java (5 endpoints)
+6. Test all endpoints via Postman + H2 console before moving to Task 2.2
+
+
+=================================================
+TASK 2.2 — Kafka Consumer: Stock Reservation/Release + Publish Inventory Events
+=================================================
+
+GOAL:
+Consume OrderCreatedEvent to reserve stock (or reject if insufficient),
+and consume OrderCancelledEvent to release previously reserved stock.
+Publish InventoryReservedEvent / InventoryRejectedEvent in response.
+
+DEPENDS ON: Task 2.1 complete. Also needs a running Kafka broker on
+localhost:9092 for testing — see Member 3's Task 3.0 for the shared
+docker-compose.yml (coordinate with Member 3, this should exist early).
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/inventory/event/dto/EventEnvelope.java
+2. src/main/java/com/ecommerce/inventory/event/dto/OrderCreatedPayload.java
+3. src/main/java/com/ecommerce/inventory/event/dto/OrderCancelledPayload.java
+4. src/main/java/com/ecommerce/inventory/event/dto/OrderItemEventDto.java
+5. src/main/java/com/ecommerce/inventory/event/dto/InventoryReservedPayload.java
+6. src/main/java/com/ecommerce/inventory/event/dto/InventoryRejectedPayload.java
+7. src/main/java/com/ecommerce/inventory/event/dto/InventoryUnavailableItemDto.java
+8. src/main/java/com/ecommerce/inventory/event/producer/InventoryEventProducer.java
+9. src/main/java/com/ecommerce/inventory/event/consumer/OrderEventConsumer.java
+
+FILES TO MODIFY:
+- ProductService.java (add reserveStock() and releaseStock() methods)
+- application.yml (add Kafka producer + consumer config)
+
+NOTE ON DUPLICATE DTOs: OrderCreatedPayload, OrderCancelledPayload, and
+OrderItemEventDto here are THIS SERVICE's own local copies of the same JSON
+shapes Member 1 publishes. Field names must match EXACTLY what Member 1's
+Task 1.2 produces:
+  OrderCreatedEvent payload: { orderId, customerId, items: [{productId, quantity}], totalAmount }
+  OrderCancelledEvent payload: { orderId, items: [{productId, quantity}], previousStatus }
+
+--------------------------------------------------
+FILE 1: EventEnvelope.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.event.dto
+Fields: String eventType, String eventId, String timestamp, Object payload
+
+--------------------------------------------------
+FILE 2: OrderCreatedPayload.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.event.dto
+Fields: String orderId, String customerId, List<OrderItemEventDto> items, BigDecimal totalAmount
+
+--------------------------------------------------
+FILE 3: OrderCancelledPayload.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.event.dto
+Fields: String orderId, List<OrderItemEventDto> items, String previousStatus
+
+--------------------------------------------------
+FILE 4: OrderItemEventDto.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.event.dto
+Fields: String productId, Integer quantity
+
+--------------------------------------------------
+FILE 5: InventoryReservedPayload.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.event.dto
+Fields: String orderId, List<OrderItemEventDto> items
+
+--------------------------------------------------
+FILE 6: InventoryRejectedPayload.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.event.dto
+Fields: String orderId, String reason, List<InventoryUnavailableItemDto> unavailableItems
+
+--------------------------------------------------
+FILE 7: InventoryUnavailableItemDto.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.event.dto
+Fields: String productId, Integer requested, Integer available
+
+--------------------------------------------------
+FILE 8: InventoryEventProducer.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.event.producer
+Annotations: @Component
+Constructor-inject: KafkaTemplate<String, EventEnvelope>
+
+Method: publish(String eventType, Object payload)
+  Logic: same pattern as Member 1's OrderEventProducer — build EventEnvelope
+  with random eventId, current timestamp, then
+  kafkaTemplate.send("inventory-events", envelope)
+
+--------------------------------------------------
+FILE 9: OrderEventConsumer.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.event.consumer
+Annotations: @Component
+Constructor-inject: ProductService, InventoryEventProducer, ObjectMapper
+
+Method: @KafkaListener(topics = "order-events", groupId = "inventory-service")
+  onMessage(String rawMessage)
+  Logic:
+    1. Parse rawMessage to read "eventType" field
+    2. IF eventType == "OrderCreatedEvent":
+       - parse payload into OrderCreatedPayload
+       - call productService.reserveStock(payload.orderId, payload.items)
+         (this method internally decides success/failure and calls the
+         producer itself — see below)
+    3. IF eventType == "OrderCancelledEvent":
+       - parse payload into OrderCancelledPayload
+       - call productService.releaseStock(payload.items)
+    4. IF eventType == "OrderConfirmedEvent" or "OrderRejectedEvent": ignore
+       (this service does not act on those)
+
+--------------------------------------------------
+MODIFY: ProductService.java — add 2 methods
+--------------------------------------------------
+Constructor-inject (add): InventoryEventProducer
+
+Method: reserveStock(String orderId, List<OrderItemEventDto> items) -> void
+  Logic:
+    1. For each item, load the Product by productId (UUID.fromString(item.productId))
+    2. Check: for EVERY item, is (stockQuantity - reservedQuantity) >= item.quantity?
+    3. IF all items have sufficient available stock:
+       - for each item: product.reservedQuantity += item.quantity; save
+       - build InventoryReservedPayload(orderId, items)
+       - inventoryEventProducer.publish("InventoryReservedEvent", payload)
+    4. IF any item is insufficient:
+       - do NOT reserve ANY items (all-or-nothing — a partial reservation
+         would leave inconsistent state)
+       - build list of InventoryUnavailableItemDto for the insufficient ones
+         (include requested vs available amounts)
+       - build InventoryRejectedPayload(orderId, "INSUFFICIENT_STOCK", unavailableItems)
+       - inventoryEventProducer.publish("InventoryRejectedEvent", payload)
+
+Method: releaseStock(List<OrderItemEventDto> items) -> void
+  Logic:
+    1. For each item, load Product by productId
+    2. product.reservedQuantity -= item.quantity (never let it go below 0 —
+       clamp to 0 if a negative would occur, and log a warning if that happens
+       since it indicates a data inconsistency)
+    3. Save each updated product
+    (no event is published after release — this is a terminal step)
+
+--------------------------------------------------
+MODIFY: application.yml — add:
+--------------------------------------------------
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: inventory-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] Publishing a valid OrderCreatedEvent (via Member 1's flow, or manually
+    via console producer) with sufficient stock increases the matching
+    product's reservedQuantity by the requested quantity, and a
+    InventoryReservedEvent appears on "inventory-events"
+[ ] Publishing an OrderCreatedEvent requesting MORE than available stock
+    results in NO change to reservedQuantity for ANY item in that order
+    (all-or-nothing), and an InventoryRejectedEvent appears with correct
+    unavailableItems detail
+[ ] Publishing an OrderCancelledEvent decreases reservedQuantity by the
+    cancelled quantities, never going below 0
+[ ] GET /products/{id} reflects updated reservedQuantity/availableQuantity
+    immediately after either event is processed
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Create the 7 event DTO classes (match Member 1's contract exactly)
+2. Create InventoryEventProducer.java
+3. Create OrderEventConsumer.java
+4. Add reserveStock() and releaseStock() to ProductService.java
+5. Add Kafka config to application.yml
+6. Test: manually publish an OrderCreatedEvent JSON to "order-events" topic,
+   verify reservedQuantity changes and correct event is published back
+
+
+=================================================
+TASK 2.3 — Kafka Streams: Real-Time Revenue Aggregation
+=================================================
+
+GOAL:
+Build a genuine Kafka Streams topology that maintains a running total of
+revenue from OrderCreatedEvent messages, queryable via the Interactive
+Query API.
+
+DEPENDS ON: Task 2.2 complete (Kafka config already set up).
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/inventory/streams/RevenueStreamsTopology.java
+2. src/main/java/com/ecommerce/inventory/streams/RevenueQueryService.java
+
+ADD DEPENDENCY to pom.xml (if not already present):
+<dependency>
+    <groupId>org.apache.kafka</groupId>
+    <artifactId>kafka-streams</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.springframework.kafka</groupId>
+    <artifactId>spring-kafka</artifactId>
+</dependency>
+
+FILES TO MODIFY:
+- application.yml (add Kafka Streams config)
+
+--------------------------------------------------
+FILE 1: RevenueStreamsTopology.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.streams
+Annotations: @Configuration
+
+Bean method: @Bean
+  public KStream<String, String> revenueStream(StreamsBuilder streamsBuilder)
+
+  Logic (pseudocode — exact Java syntax depends on your Kafka Streams /
+  Spring Cloud Stream version, confirm against the version in pom.xml):
+    1. KStream<String, String> source = streamsBuilder.stream("order-events");
+       (using String values and manually parsing JSON is simplest here;
+       avoid a custom JSON Serde unless the team is comfortable with it)
+    2. Filter: only rows where the JSON's "eventType" field equals
+       "OrderCreatedEvent" (parse with a JSON library like Jackson's
+       ObjectMapper inside the filter's lambda)
+    3. Extract totalAmount (a double) from each message's payload
+    4. groupBy a constant key (e.g., "TOTAL") so all messages aggregate
+       into a single running sum
+    5. aggregate:
+       - initializer: () -> 0.0
+       - adder: (key, extractedAmount, currentTotal) -> currentTotal + extractedAmount
+       - Materialized.as("revenue-store")   <-- exact store name, referenced
+         in RevenueQueryService.java below, must match exactly
+    6. Return/build the resulting KTable (the topology auto-runs once the
+       Spring context starts, no explicit .start() call needed with
+       Spring Cloud Stream/Kafka Streams binder — confirm setup per your
+       chosen library's docs)
+
+IMPORTANT: If using Spring Cloud Stream's Kafka Streams binder instead of
+raw Kafka Streams API, the equivalent is a @Bean of type
+java.util.function.Consumer<KStream<String,String>> named appropriately,
+configured via spring.cloud.stream.bindings in application.yml. Confirm
+with the team which approach (raw Kafka Streams vs Spring Cloud Stream
+binder) you're using BEFORE starting this file, since the class structure
+differs. The pseudocode above assumes raw Kafka Streams API for clarity.
+
+--------------------------------------------------
+FILE 2: RevenueQueryService.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.streams
+Annotations: @Service
+Constructor-inject: StreamsBuilderFactoryBean (Spring Kafka's wrapper for
+accessing the running KafkaStreams instance)
+
+Method: getTotalRevenue() -> Double
+  Logic:
+    1. KafkaStreams streams = streamsBuilderFactoryBean.getKafkaStreams();
+    2. ReadOnlyKeyValueStore<String, Double> store = streams.store(
+         StoreQueryParameters.fromNameAndType("revenue-store",
+         QueryableStoreTypes.keyValueStore()));
+    3. Double total = store.get("TOTAL");
+    4. Return total != null ? total : 0.0;
+
+--------------------------------------------------
+MODIFY: application.yml — add:
+--------------------------------------------------
+spring:
+  kafka:
+    streams:
+      application-id: inventory-service-streams
+      bootstrap-servers: localhost:9092
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] After the service starts and several OrderCreatedEvent messages have
+    been published (via Member 1 creating real orders, or manual test
+    messages), calling RevenueQueryService.getTotalRevenue() returns the
+    correct sum of all totalAmount values seen so far
+[ ] The total updates within a few seconds of a new OrderCreatedEvent
+    being published — no manual refresh/restart required
+[ ] Restarting the service and re-consuming from the beginning of the
+    topic (or continuing from committed offset) does not double-count
+    already-processed events (default Kafka Streams offset behavior
+    handles this — just don't manually reset offsets during testing)
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Confirm with team: raw Kafka Streams API vs Spring Cloud Stream binder
+2. Add kafka-streams dependency to pom.xml if missing
+3. Create RevenueStreamsTopology.java
+4. Create RevenueQueryService.java
+5. Add Kafka Streams config to application.yml
+6. Test: publish 2-3 OrderCreatedEvent messages with known totalAmount
+   values, then call getTotalRevenue() (temporarily via a debug log or
+   quick test endpoint) and confirm the sum is correct — full REST wiring
+   happens in Task 2.4
+
+
+=================================================
+TASK 2.4 — Analytics REST Endpoints (Low-Stock + Revenue)
+=================================================
+
+GOAL:
+Expose two REST endpoints: low-stock (plain SQL query against current DB
+state) and revenue (reads from the Kafka Streams state store built in Task 2.3).
+
+DEPENDS ON: Task 2.2 and Task 2.3 complete.
+
+--------------------------------------------------
+FILES TO CREATE
+--------------------------------------------------
+1. src/main/java/com/ecommerce/inventory/dto/LowStockResponse.java
+2. src/main/java/com/ecommerce/inventory/dto/RevenueResponse.java
+3. src/main/java/com/ecommerce/inventory/controller/AnalyticsController.java
+
+FILES TO MODIFY:
+- ProductRepository.java (add a low-stock query method)
+- ProductService.java (add findLowStock method)
+
+--------------------------------------------------
+FILE 1: LowStockResponse.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.dto
+Fields:
+- UUID productId
+- String name
+- Integer availableQuantity
+- Integer threshold
+
+Example JSON output (as part of a list):
+{
+  "productId": "b2c3d4e5-0000-0000-0000-000000000002",
+  "name": "Wireless Headphones",
+  "availableQuantity": 3,
+  "threshold": 10
+}
+
+--------------------------------------------------
+FILE 2: RevenueResponse.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.dto
+Fields:
+- Double totalRevenue
+
+Example JSON output:
+{ "totalRevenue": 4599.85 }
+
+--------------------------------------------------
+MODIFY: ProductRepository.java — add method
+--------------------------------------------------
+Add a custom query (using @Query with JPQL, since "available" isn't a
+stored column):
+
+@Query("SELECT p FROM Product p WHERE (p.stockQuantity - p.reservedQuantity) < :threshold")
+List<Product> findLowStock(@Param("threshold") int threshold);
+
+--------------------------------------------------
+MODIFY: ProductService.java — add method
+--------------------------------------------------
+Method: findLowStock(int threshold) -> List<LowStockResponse>
+  Logic:
+    1. productRepository.findLowStock(threshold)
+    2. Map each to LowStockResponse (availableQuantity = stockQuantity -
+       reservedQuantity, threshold = the passed-in value)
+    3. Return list
+
+--------------------------------------------------
+FILE 3: AnalyticsController.java
+--------------------------------------------------
+Package: com.ecommerce.inventory.controller
+Annotations: @RestController @RequestMapping("/analytics")
+Constructor-inject: ProductService, RevenueQueryService
+
+Endpoint 1: @GetMapping("/low-stock")
+  getLowStock(@RequestParam(defaultValue = "10") int threshold)
+    -> ResponseEntity<List<LowStockResponse>>
+  - return ResponseEntity.ok(productService.findLowStock(threshold))
+
+Endpoint 2: @GetMapping("/revenue")
+  getRevenue() -> ResponseEntity<RevenueResponse>
+  - Double total = revenueQueryService.getTotalRevenue()
+  - return ResponseEntity.ok(new RevenueResponse(total))
+
+--------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------
+[ ] GET /analytics/low-stock?threshold=10 returns only products where
+    (stockQuantity - reservedQuantity) < 10
+[ ] GET /analytics/low-stock with no threshold param defaults to 10
+[ ] GET /analytics/revenue returns the current running total matching
+    what was verified in Task 2.3's testing
+[ ] Both endpoints return valid JSON even when there is no data yet
+    (empty list for low-stock, 0.0 for revenue — no errors)
+
+--------------------------------------------------
+IMPLEMENTATION STEPS
+--------------------------------------------------
+1. Add the low-stock query method to ProductRepository.java
+2. Add findLowStock() to ProductService.java
+3. Create the 2 response DTOs
+4. Create AnalyticsController.java with both endpoints
+5. Test both endpoints via Postman: seed products with varying stock
+   levels, place a few orders, confirm both figures are correct
+
+
+=================================================
+END OF MEMBER 2 TASKS
+=================================================
