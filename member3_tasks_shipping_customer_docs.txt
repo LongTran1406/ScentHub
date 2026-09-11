@@ -752,15 +752,14 @@ ACCEPTANCE CRITERIA
 
 
 =================================================
-TASK 3.6 — README and Meeting Minutes
+TASK 3.6 — README
 =================================================
 
 GOAL:
 Maintain project documentation: a top-level README for setup/run
-instructions, and weekly meeting minutes from Week 3 to Week 11.
-
+instructions.
 --------------------------------------------------
-DELIVERABLE 1: README.md (repo root)
+DELIVERABLE: README.md (repo root)
 --------------------------------------------------
 Required sections:
 1. Project overview (1-2 paragraphs, based on the presentation script's
