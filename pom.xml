@@ -14,6 +14,7 @@
     <modules>
         <module>shipping-service</module>
         <module>customer-service</module>
+        <module>inventory-service</module>
     </modules>
 
     <properties>
