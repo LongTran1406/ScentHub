@@ -15,6 +15,7 @@
         <module>shipping-service</module>
         <module>customer-service</module>
         <module>inventory-service</module>
+        <module>order-service</module>
     </modules>
 
     <properties>
@@ -52,6 +53,7 @@
                     <configuration>
                         <source>21</source>
                         <target>21</target>
+                        <parameters>true</parameters>
                     </configuration>
                 </plugin>
             </plugins>
