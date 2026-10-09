@@ -1,20 +1,26 @@
 package com.ecommerce.customer.service;
 
-import com.ecommerce.customer.dto.*;
-import com.ecommerce.customer.entity.Complaint;
-import com.ecommerce.customer.entity.Customer;
-import com.ecommerce.customer.entity.Feedback;
-import com.ecommerce.customer.exception.CustomerNotFoundException;
-import com.ecommerce.customer.repository.ComplaintRepository;
-import com.ecommerce.customer.repository.CustomerRepository;
-import com.ecommerce.customer.repository.FeedbackRepository;
+import com.ecommerce.customer.domain.exception.CustomerNotFoundException;
+import com.ecommerce.customer.domain.model.Complaint;
+import com.ecommerce.customer.domain.model.Customer;
+import com.ecommerce.customer.domain.model.Feedback;
+import com.ecommerce.customer.domain.repository.ComplaintRepository;
+import com.ecommerce.customer.domain.repository.CustomerRepository;
+import com.ecommerce.customer.domain.repository.FeedbackRepository;
+import com.ecommerce.customer.service.dto.ComplaintResponse;
+import com.ecommerce.customer.service.dto.CreateComplaintRequest;
+import com.ecommerce.customer.service.dto.CreateCustomerRequest;
+import com.ecommerce.customer.service.dto.CreateFeedbackRequest;
+import com.ecommerce.customer.service.dto.CustomerResponse;
+import com.ecommerce.customer.service.dto.FeedbackResponse;
+import com.ecommerce.customer.service.dto.UpdateCustomerRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
+/** Application service for customer profiles, feedback and complaints. Rules live in the domain model. */
 @Service
 public class CustomerService {
 
@@ -30,72 +36,59 @@ public class CustomerService {
         this.complaintRepository = complaintRepository;
     }
 
+    @Transactional
     public CustomerResponse createCustomer(CreateCustomerRequest request) {
-        Customer customer = new Customer();
-        customer.setName(request.getName());
-        customer.setEmail(request.getEmail());
-        customer.setCreatedAt(Instant.now());
-        Customer saved = customerRepository.save(customer);
-        return mapToCustomerResponse(saved);
+        Customer customer = Customer.register(request.getName(), request.getEmail());
+        return toResponse(customerRepository.save(customer));
     }
 
+    @Transactional(readOnly = true)
     public CustomerResponse getCustomer(UUID customerId) {
-        Customer customer = customerRepository.findById(customerId)
-            .orElseThrow(() -> new CustomerNotFoundException(customerId));
-        return mapToCustomerResponse(customer);
+        return toResponse(load(customerId));
     }
 
+    @Transactional
     public CustomerResponse updateCustomer(UUID customerId, UpdateCustomerRequest request) {
-        Customer customer = customerRepository.findById(customerId)
-            .orElseThrow(() -> new CustomerNotFoundException(customerId));
-        if (request.getName() != null) customer.setName(request.getName());
-        if (request.getEmail() != null) customer.setEmail(request.getEmail());
-        Customer saved = customerRepository.save(customer);
-        return mapToCustomerResponse(saved);
+        Customer customer = load(customerId);
+        customer.updateProfile(request.getName(), request.getEmail());
+        return toResponse(customerRepository.save(customer));
     }
 
+    @Transactional
     public FeedbackResponse submitFeedback(UUID customerId, CreateFeedbackRequest request) {
-        customerRepository.findById(customerId)
-            .orElseThrow(() -> new CustomerNotFoundException(customerId));
-
-        Feedback feedback = new Feedback();
-        feedback.setCustomerId(customerId);
-        feedback.setContent(request.getContent());
-        feedback.setRating(request.getRating());
-        feedback.setCreatedAt(Instant.now());
-        Feedback saved = feedbackRepository.save(feedback);
-        return mapToFeedbackResponse(saved);
+        requireCustomer(customerId);
+        Feedback saved = feedbackRepository.save(
+                Feedback.submit(customerId, request.getContent(), request.getRating()));
+        return new FeedbackResponse(saved.getId(), saved.getContent(), saved.getRating(),
+                saved.getCreatedAt().toString());
     }
 
+    @Transactional
     public ComplaintResponse submitComplaint(UUID customerId, CreateComplaintRequest request) {
-        customerRepository.findById(customerId)
-            .orElseThrow(() -> new CustomerNotFoundException(customerId));
-
-        Complaint complaint = new Complaint();
-        complaint.setCustomerId(customerId);
-        complaint.setContent(request.getContent());
-        complaint.setStatus("OPEN");
-        complaint.setCreatedAt(Instant.now());
-        Complaint saved = complaintRepository.save(complaint);
-        return mapToComplaintResponse(saved);
+        requireCustomer(customerId);
+        return toResponse(complaintRepository.save(Complaint.raise(customerId, request.getContent())));
     }
 
+    @Transactional(readOnly = true)
     public List<ComplaintResponse> getComplaintsByCustomer(UUID customerId) {
-        return complaintRepository.findByCustomerId(customerId)
-            .stream()
-            .map(this::mapToComplaintResponse)
-            .collect(Collectors.toList());
+        return complaintRepository.findByCustomerId(customerId).stream().map(CustomerService::toResponse).toList();
     }
 
-    private CustomerResponse mapToCustomerResponse(Customer c) {
-        return new CustomerResponse(c.getId(), c.getName(), c.getEmail());
+    private Customer load(UUID customerId) {
+        return customerRepository.findById(customerId).orElseThrow(() -> new CustomerNotFoundException(customerId));
     }
 
-    private FeedbackResponse mapToFeedbackResponse(Feedback f) {
-        return new FeedbackResponse(f.getId(), f.getContent(), f.getRating(), f.getCreatedAt().toString());
+    private void requireCustomer(UUID customerId) {
+        if (!customerRepository.existsById(customerId)) {
+            throw new CustomerNotFoundException(customerId);
+        }
     }
 
-    private ComplaintResponse mapToComplaintResponse(Complaint c) {
-        return new ComplaintResponse(c.getId(), c.getContent(), c.getStatus(), c.getCreatedAt().toString());
+    private static CustomerResponse toResponse(Customer c) {
+        return new CustomerResponse(c.getId(), c.getName(), c.getEmail().address());
+    }
+
+    private static ComplaintResponse toResponse(Complaint c) {
+        return new ComplaintResponse(c.getId(), c.getContent(), c.getStatus().name(), c.getCreatedAt().toString());
     }
 }

@@ -1,4 +1,101 @@
 =================================================
+REVISION NOTES (2026-10-08) - read before using the task text below
+=================================================
+- MESSAGING FRAMEWORK: the course specification makes Spring Cloud Stream a MANDATORY dependency. The original plan
+  below said "Spring Cloud Stream / spring-kafka" and its code samples use spring-kafka (@KafkaListener,
+  KafkaTemplate). All services were migrated to Spring Cloud Stream (functional style, Kafka binder, Spring Cloud
+  2023.0.1 / Stream 4.1.x). Topics, consumer groups and offsets are now configured in application.yml, not in code.
+- WIRE FORMAT UNCHANGED: messages are still JSON strings in the envelope
+  {eventType, eventId, timestamp, payload}; producers still serialize with Jackson and consumers still parse the
+  string and route on eventType. (The plan's JsonSerializer/JsonDeserializer was never used.)
+
+WHERE THE IMPLEMENTATION DIFFERS FROM THE PLAN BELOW (Member 2 / inventory-service)
+- Task 2.2, FILE 8 InventoryEventProducer: uses StreamBridge.send("inventoryEvents-out-0", jsonString) instead of
+  KafkaTemplate; the binding maps to topic "inventory-events". FILE 9 OrderEventConsumer implements
+  Consumer<String> as bean "orderEvents" (binding orderEvents-in-0 -> topic order-events, group inventory-service).
+- Task 2.3 (Kafka Streams): implemented with the Spring Cloud Stream KAFKA STREAMS BINDER (the plan's alternative
+  path), not the raw StreamsBuilder bean:
+    * RevenueStreamsTopology exposes `@Bean Consumer<KStream<String,String>> revenue()` (binding revenue-in-0,
+      binder "kstream", topic order-events). Logic is unchanged (filter OrderCreatedEvent -> key "TOTAL" -> sum of
+      totalAmount in the persistent store "revenue-store"; Double values).
+    * RevenueQueryService uses InteractiveQueryService.getQueryableStore("revenue-store", keyValueStore())
+      instead of StreamsBuilderFactoryBean. @EnableKafkaStreams was removed.
+    * Dependencies: spring-cloud-stream-binder-kafka (consumer/producer) and
+      spring-cloud-stream-binder-kafka-streams (replaces the direct kafka-streams + spring-kafka dependencies).
+    * application.yml: the plan's spring.kafka.streams block is replaced by the spring.cloud.stream config.
+      Because this service uses TWO binders at once ("kafka" and "kstream"), both are declared explicitly under
+      spring.cloud.stream.binders with inheritEnvironment=false. Consequence: binding-level Kafka settings (e.g.
+      startOffset, the ByteArraySerializer override on inventoryEvents-out-0) must live INSIDE that binder's
+      `environment:` block, otherwise they are silently ignored. auto.offset.reset for streams is "earliest".
+- Revenue still counts EVERY OrderCreatedEvent, including orders that this service later rejects (kept on purpose -
+  least change). Orders are now priced from the real product prices (see REVISION NOTES 2), so the figure is the
+  sum of the real totals of all placed orders.
+
+ADDED AFTER THE ORIGINAL PLAN - TASK 2.5: TRENDING PRODUCTS (second real-time analysis story)
+The course specification requires at least TWO user stories based on real-time stream processing; the plan only had
+revenue (low-stock is a plain SQL query, so it does not count).
+GOAL: report which products are being ordered most right now.
+FILES: inventory-service/.../streams/ProductDemandTopology.java, TrendingProductsQueryService.java,
+       dto/TrendingProductResponse.java; AnalyticsController gets GET /analytics/trending-products.
+LOGIC: bean `Consumer<KStream<String,String>> demand()` reads order-events; filters OrderCreatedEvent; flatMaps each
+       order into one (productId, quantity) record per line item; groups by productId; sums quantity in 5-minute
+       TUMBLING windows (event time = Kafka record timestamp) into the windowed store "product-demand-store".
+       Equivalent query: SELECT productId, SUM(quantity) FROM order_created_items
+                         WINDOW TUMBLING (SIZE 5 MINUTES) GROUP BY productId;
+API:   GET /analytics/trending-products?minutes=10&limit=5 -> [{productId, name, unitsOrdered}] highest first.
+       Sums the windows that started within the last `minutes` minutes. `name` is looked up in the products table
+       and is null for unknown/deleted products. Returns [] if the store is not ready yet.
+CONFIG NOTE: two Kafka Streams functions in one app need DIFFERENT applicationId and state.dir values, set per
+       function (spring.cloud.stream.kafka.streams.binder.functions.<name>.applicationId / .configuration.state.dir)
+       in BOTH the main streams section (read by the function processor) and the kstream binder environment.
+       Revenue keeps application id "inventory-service-streams"; demand uses "inventory-service-demand".
+ACCEPTANCE: after orders for products A(2)+B(1), B(5), C(1)+B(2), A(1) the endpoint returns B=8, A=3, C=1 in that
+       order; limit=1 returns only B. (Verified live on 2026-10-08.)
+=================================================
+
+=================================================
+REVISION NOTES 2 (2026-10-08) - restructuring, validation, tests
+=================================================
+STRUCTURE: every service was restructured into the four layers required by the course specification. The file
+paths in the original plan below map to the new packages like this (base package com.ecommerce.<service>):
+  controller/*                -> presentation.controller   (controllers + one @RestControllerAdvice ApiExceptionHandler)
+  dto/* (REST request/response)-> service.dto               (the service layer's API contract, also used as JSON)
+  service/*                   -> service                    (application services: orchestration only)
+  entity/*                    -> domain.model               (aggregates, entities, value objects - the business rules)
+  exception/*                 -> domain.exception
+  repository/*                -> domain.repository (PORT interface) + infrastructure.persistence (Spring Data + adapter)
+  event/dto, event/consumer, event/producer -> infrastructure.messaging (+ .dto)  [Kafka/Spring Cloud Stream]
+  client/*, config/*          -> infrastructure.client, infrastructure.config
+  streams/*                   -> infrastructure.streams
+Dependencies point inwards: presentation -> service -> domain <- infrastructure (infrastructure implements the ports
+declared in the domain). The domain layer has no Spring/Kafka/HTTP code except JPA annotations on the aggregates.
+
+WHERE THE INVENTORY SERVICE NOW DIFFERS FROM THE PLAN BELOW (Member 2)
+- DOMAIN MODEL (Task 2.1 FILE 1): Product is an aggregate root with the value object Money for its price and
+  @Version for optimistic locking. availableQuantity is derived (stock - reserved), never stored. Invariants live on
+  the aggregate: name required, price/stock never negative, stock can never be lowered below the reserved quantity.
+  Behaviour: Product.create(), update(), canReserve(), reserve(), release() (release clamps at 0 and reports it).
+- VALIDATION (Task 2.1): invalid product data now returns 400 (blank name, negative/missing price, negative stock,
+  stock below reserved) instead of a database error.
+- RESERVATION (Task 2.2): the all-or-nothing rule is the domain service StockReservationService (works across several
+  Product aggregates). Improvements over the plan: lines for the same product are SUMMED before checking, so an order
+  cannot oversell by splitting a product over two lines; an unknown productId rejects the whole order with reason
+  PRODUCT_NOT_FOUND (it used to throw inside the Kafka consumer and leave the order PENDING forever). Shortage detail
+  (requested/available) is unchanged. Outcome events are domain events StockReserved / StockRejected that
+  KafkaInventoryEventPublisher turns into InventoryReservedEvent / InventoryRejectedEvent after commit.
+- USE-CASE CLASSES: ProductService (catalogue CRUD/search), StockService (reserveForOrder / releaseForOrder - what the
+  Kafka consumer calls), AnalyticsService (low stock, revenue, trending). The old ProductService.reserveStock/
+  releaseStock/findLowStock methods moved there. Concurrent updates: an OptimisticLockingFailureException is rethrown
+  by the consumer so the binder retries the message.
+- STREAMS: RevenueQueryService and TrendingProductsQueryService were replaced by the port OrderStatistics
+  (domain.port) implemented by StreamsOrderStatistics (infrastructure.streams); ranking and product-name lookup for
+  trending products happen in AnalyticsService. The topologies themselves are unchanged.
+- TESTS (new): ProductTest, StockReservationServiceTest (domain), StockServiceTest, AnalyticsServiceTest (application
+  services with in-memory fakes) and InventoryMessagingTest (Spring Cloud Stream test binder + real H2: order events in,
+  inventory events out). The Kafka Streams topologies are covered by scripts/smoke-test.sh because they need a broker.
+=================================================
+
+=================================================
 MEMBER 2 — PRODUCT & INVENTORY SERVICE + STREAM PROCESSING
 =================================================
 

@@ -15,17 +15,32 @@ spring:
     console:
       enabled: true
       path: /h2-console
-  kafka:
-    bootstrap-servers: localhost:9092
-    producer:
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+  cloud:
+    function:
+      definition: inventoryEvents
+    stream:
+      kafka:
+        binder:
+          brokers: localhost:9092
+        bindings:
+          inventoryEvents-in-0:
+            consumer:
+              startOffset: earliest
+      bindings:
+        inventoryEvents-in-0:
+          destination: inventory-events
+          group: order-service
+        orderEvents-out-0:
+          destination: order-events
 
 shipping-service:
   base-url: http://localhost:8083
 
 product-service:
   base-url: http://localhost:8082
+
+customer-service:
+  base-url: http://localhost:8084
 
 groq:
   api-key: ${GROQ_API_KEY:gsk_placeholder_replace_with_real_key_0000000000}

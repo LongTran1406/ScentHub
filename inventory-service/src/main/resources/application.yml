@@ -15,22 +15,91 @@ spring:
     console:
       enabled: true
       path: /h2-console
-  kafka:
-    bootstrap-servers: localhost:9092
-    consumer:
-      group-id: inventory-service
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      auto-offset-reset: earliest
-    producer:
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.apache.kafka.common.serialization.StringSerializer
-    streams:
-      application-id: inventory-service-streams
-      bootstrap-servers: localhost:9092
-      properties:
-        default.key.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
-        default.value.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+  cloud:
+    function:
+      # orderEvents = plain Kafka consumer; revenue, demand = Kafka Streams topologies
+      definition: orderEvents;revenue;demand
+    stream:
+      binders:
+        kafka:
+          type: kafka
+          inheritEnvironment: false
+          environment:
+            spring:
+              cloud:
+                stream:
+                  kafka:
+                    binder:
+                      brokers: localhost:9092
+                    bindings:
+                      orderEvents-in-0:
+                        consumer:
+                          startOffset: earliest
+                      inventoryEvents-out-0:
+                        producer:
+                          configuration:
+                            key.serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+                            value.serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+        kstream:
+          type: kstream
+          inheritEnvironment: false
+          environment:
+            spring:
+              cloud:
+                stream:
+                  kafka:
+                    streams:
+                      binder:
+                        brokers: localhost:9092
+                        # one KafkaStreams instance per function: each needs its own application id AND state dir
+                        functions:
+                          revenue:
+                            applicationId: inventory-service-streams
+                            configuration:
+                              state.dir: ${java.io.tmpdir}/scenthub-streams/revenue
+                          demand:
+                            applicationId: inventory-service-demand
+                            configuration:
+                              state.dir: ${java.io.tmpdir}/scenthub-streams/demand
+                        configuration:
+                          default.key.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+                          default.value.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+                          auto.offset.reset: earliest
+      kafka:
+        binder:
+          brokers: localhost:9092
+        streams:
+          binder:
+            brokers: localhost:9092
+            # same per-function ids/dirs as in the kstream binder environment above (the function processor
+            # runs in the main context and reads these)
+            functions:
+              revenue:
+                applicationId: inventory-service-streams
+                configuration:
+                  state.dir: ${java.io.tmpdir}/scenthub-streams/revenue
+              demand:
+                applicationId: inventory-service-demand
+                configuration:
+                  state.dir: ${java.io.tmpdir}/scenthub-streams/demand
+            configuration:
+              default.key.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+              default.value.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+              auto.offset.reset: earliest
+      bindings:
+        orderEvents-in-0:
+          binder: kafka
+          destination: order-events
+          group: inventory-service
+        inventoryEvents-out-0:
+          binder: kafka
+          destination: inventory-events
+        revenue-in-0:
+          binder: kstream
+          destination: order-events
+        demand-in-0:
+          binder: kstream
+          destination: order-events
 
 server:
   port: 8082

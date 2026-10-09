@@ -1,4 +1,63 @@
 =================================================
+REVISION NOTES (2026-10-08) - read before using the task text below
+=================================================
+- MESSAGING FRAMEWORK: the course specification makes Spring Cloud Stream a MANDATORY dependency. The original plan
+  below said "Spring Cloud Stream / spring-kafka" and its code samples use spring-kafka (@KafkaListener,
+  KafkaTemplate). All services were migrated to Spring Cloud Stream (functional style, Kafka binder, Spring Cloud
+  2023.0.1 / Stream 4.1.x). Topics, consumer groups and offsets are now configured in application.yml, not in code.
+- WIRE FORMAT UNCHANGED: messages are still JSON strings in the envelope
+  {eventType, eventId, timestamp, payload}; producers still serialize with Jackson and consumers still parse the
+  string and route on eventType. (The plan's JsonSerializer/JsonDeserializer was never used.)
+
+WHERE THE IMPLEMENTATION DIFFERS FROM THE PLAN BELOW (Member 3 / shipping-service, customer-service, docs)
+- Task 3.2, FILE 4 OrderEventConsumer: implements Consumer<String> as bean "orderEvents" instead of using
+  @KafkaListener(topics="order-events", groupId="shipping-service"). application.yml sets
+  spring.cloud.function.definition=orderEvents and binds orderEvents-in-0 to topic order-events, group
+  shipping-service, startOffset earliest (replaces the spring.kafka.consumer block). Business logic unchanged:
+  duplicate OrderConfirmedEvent is ignored (logged); cancelling a missing/dispatched shipment never throws.
+- customer-service still has NO Kafka and no Spring Cloud Stream dependency (as planned).
+- Task 3.5 Postman collection: now also contains "Trending Products Report" (Member 2's new Task 2.5 endpoint).
+- Task 3.6 README: the root README.md was rewritten (architecture, binding table, stream queries, sample inputs,
+  known limitations). MEETING MINUTES (weeks 3-11) are NOT in the repository and must be supplied by the team.
+=================================================
+
+=================================================
+REVISION NOTES 2 (2026-10-08) - restructuring, validation, tests
+=================================================
+STRUCTURE: every service was restructured into the four layers required by the course specification. The file
+paths in the original plan below map to the new packages like this (base package com.ecommerce.<service>):
+  controller/*                -> presentation.controller   (controllers + one @RestControllerAdvice ApiExceptionHandler)
+  dto/* (REST request/response)-> service.dto               (the service layer's API contract, also used as JSON)
+  service/*                   -> service                    (application services: orchestration only)
+  entity/*                    -> domain.model               (aggregates, entities, value objects - the business rules)
+  exception/*                 -> domain.exception
+  repository/*                -> domain.repository (PORT interface) + infrastructure.persistence (Spring Data + adapter)
+  event/dto, event/consumer, event/producer -> infrastructure.messaging (+ .dto)  [Kafka/Spring Cloud Stream]
+  client/*, config/*          -> infrastructure.client, infrastructure.config
+  streams/*                   -> infrastructure.streams
+Dependencies point inwards: presentation -> service -> domain <- infrastructure (infrastructure implements the ports
+declared in the domain). The domain layer has no Spring/Kafka/HTTP code except JPA annotations on the aggregates.
+
+WHERE SHIPPING AND CUSTOMER NOW DIFFER FROM THE PLAN BELOW (Member 3)
+- SHIPPING DOMAIN (Task 3.1): Shipment is an aggregate root (orderId unique, @Version) with the enum ShipmentStatus
+  (CREATED, DISPATCHED, IN_TRANSIT, DELIVERED, CANCELLED; stored as the same strings). Behaviour is on the aggregate:
+  Shipment.createFor(orderId), changeStatus(), cancelIfNotDispatched(). ShipmentStatus.parse() produces the same
+  "Unknown status: X" 400. ShipmentService keeps the idempotent createShipment() and the never-throwing
+  cancelIfNotDispatched(). The consumer, endpoints and 404-means-no-shipment contract are unchanged.
+- CUSTOMER DOMAIN (Task 3.3/3.4): Customer is an aggregate root with the value object Email (validated, normalised to
+  lower case, so uniqueness is case-insensitive). Feedback and Complaint are separate small aggregates that reference
+  a customer only by id. Complaint status is the enum ComplaintStatus (OPEN/RESOLVED; only OPEN is created today).
+  New validation (400): blank name, malformed email, blank feedback/complaint content, rating outside 1-5.
+  Duplicate email is still 409. Customer Service still has no Kafka.
+- TESTS (new): ShipmentTest, ShipmentServiceTest, OrderEventsBindingTest (full context + test binder, no broker) for
+  Shipping; CustomerDomainTest, CustomerServiceTest and the context-load test for Customer.
+  The old ShippingServiceApplicationTests (needed a real broker, 65 s timeout) was replaced by OrderEventsBindingTest.
+- SMOKE TEST (Task 3.5 companion): scripts/smoke-test.sh runs ~37 checks against the four running services (rules,
+  happy path, rejection, cancellation, analytics). The Postman collection was reordered so a top-to-bottom run works
+  (Customer -> Product -> Order -> Shipping -> Cleanup) and no longer uses hard-coded customer/product ids.
+=================================================
+
+=================================================
 MEMBER 3 — SHIPPING SERVICE + CUSTOMER SERVICE + TESTING/DOCS
 =================================================
 

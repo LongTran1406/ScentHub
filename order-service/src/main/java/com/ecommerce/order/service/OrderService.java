@@ -1,166 +1,163 @@
 package com.ecommerce.order.service;
 
-import com.ecommerce.order.dto.CreateOrderRequest;
-import com.ecommerce.order.dto.OrderItemRequest;
-import com.ecommerce.order.dto.OrderItemResponse;
-import com.ecommerce.order.dto.OrderResponse;
-import com.ecommerce.order.entity.Order;
-import com.ecommerce.order.entity.OrderItem;
-import com.ecommerce.order.exception.OrderNotFoundException;
-import com.ecommerce.order.repository.OrderItemRepository;
-import com.ecommerce.order.repository.OrderRepository;
+import com.ecommerce.order.domain.event.DomainEvent;
+import com.ecommerce.order.domain.exception.InvalidOrderException;
+import com.ecommerce.order.domain.exception.OrderNotFoundException;
+import com.ecommerce.order.domain.model.Order;
+import com.ecommerce.order.domain.model.OrderLineDraft;
+import com.ecommerce.order.domain.port.CustomerDirectory;
+import com.ecommerce.order.domain.port.OrderEventPublisher;
+import com.ecommerce.order.domain.port.ProductCatalog;
+import com.ecommerce.order.domain.port.ProductSnapshot;
+import com.ecommerce.order.domain.port.ShipmentGateway;
+import com.ecommerce.order.domain.repository.OrderRepository;
+import com.ecommerce.order.domain.service.CancellationPolicy;
+import com.ecommerce.order.service.dto.CreateOrderRequest;
+import com.ecommerce.order.service.dto.OrderItemRequest;
+import com.ecommerce.order.service.dto.OrderItemResponse;
+import com.ecommerce.order.service.dto.OrderResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-import java.math.BigDecimal;
-import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
-import com.ecommerce.order.event.dto.OrderCreatedPayload;
-import com.ecommerce.order.event.dto.OrderItemEventDto;
-import com.ecommerce.order.event.producer.OrderEventProducer;
-
-import com.ecommerce.order.event.dto.OrderConfirmedPayload;
-import com.ecommerce.order.client.ShippingServiceClient;
-import com.ecommerce.order.event.dto.OrderCancelledPayload;
-import com.ecommerce.order.exception.OrderCancellationNotAllowedException;
-
-
+/**
+ * Application service: orchestrates one use case at a time. Business rules live in the domain layer
+ * ({@link Order}, {@link CancellationPolicy}); this class only loads, calls, saves and publishes.
+ */
 @Service
 public class OrderService {
 
-    private static final BigDecimal TEMP_UNIT_PRICE = new BigDecimal("74.99");
-    private static final List<String> NOT_YET_DISPATCHED_STATUSES = List.of("DISPATCHED", "IN_TRANSIT", "DELIVERED");
+    private static final Logger log = LoggerFactory.getLogger(OrderService.class);
 
     private final OrderRepository orderRepository;
-    private final OrderItemRepository orderItemRepository;
-    private final OrderEventProducer orderEventProducer;
-    private final ShippingServiceClient shippingServiceClient;
+    private final OrderEventPublisher eventPublisher;
+    private final ProductCatalog productCatalog;
+    private final CustomerDirectory customerDirectory;
+    private final ShipmentGateway shipmentGateway;
+    private final CancellationPolicy cancellationPolicy;
 
-    public OrderService(OrderRepository orderRepository, OrderItemRepository orderItemRepository,
-                        OrderEventProducer orderEventProducer, ShippingServiceClient shippingServiceClient) {
+    public OrderService(OrderRepository orderRepository,
+                        OrderEventPublisher eventPublisher,
+                        ProductCatalog productCatalog,
+                        CustomerDirectory customerDirectory,
+                        ShipmentGateway shipmentGateway,
+                        CancellationPolicy cancellationPolicy) {
         this.orderRepository = orderRepository;
-        this.orderItemRepository = orderItemRepository;
-        this.orderEventProducer = orderEventProducer;
-        this.shippingServiceClient = shippingServiceClient;
+        this.eventPublisher = eventPublisher;
+        this.productCatalog = productCatalog;
+        this.customerDirectory = customerDirectory;
+        this.shipmentGateway = shipmentGateway;
+        this.cancellationPolicy = cancellationPolicy;
     }
 
-
+    @Transactional
     public OrderResponse createOrder(CreateOrderRequest request) {
-        Order order = new Order();
-        order.setId(UUID.randomUUID());
-        order.setCustomerId(request.getCustomerId());
-        order.setStatus("PENDING");
-        Instant now = Instant.now();
-        order.setCreatedAt(now);
-        order.setUpdatedAt(now);
-
-        BigDecimal total = BigDecimal.ZERO;
-        for (OrderItemRequest itemRequest : request.getItems()) {
-            OrderItem item = new OrderItem();
-            item.setProductId(itemRequest.getProductId());
-            item.setQuantity(itemRequest.getQuantity());
-            item.setUnitPrice(TEMP_UNIT_PRICE);
-            item.setOrder(order);
-            order.getItems().add(item);
-
-            total = total.add(TEMP_UNIT_PRICE.multiply(BigDecimal.valueOf(itemRequest.getQuantity())));
+        if (request == null || request.getCustomerId() == null) {
+            throw new InvalidOrderException("customerId is required");
         }
-        order.setTotalAmount(total);
+        if (request.getItems() == null || request.getItems().isEmpty()) {
+            throw new InvalidOrderException("An order needs at least one item");
+        }
+        if (!customerDirectory.exists(request.getCustomerId())) {
+            throw new InvalidOrderException("Customer not found: " + request.getCustomerId());
+        }
 
-        Order saved = orderRepository.save(order);
+        List<OrderLineDraft> lines = new ArrayList<>();
+        for (OrderItemRequest item : request.getItems()) {
+            if (item.getProductId() == null) {
+                throw new InvalidOrderException("Every item needs a productId");
+            }
+            if (item.getQuantity() == null || item.getQuantity() <= 0) {
+                throw new InvalidOrderException("Quantity must be positive for product " + item.getProductId());
+            }
+            ProductSnapshot product = productCatalog.findProduct(item.getProductId())
+                    .orElseThrow(() -> new InvalidOrderException("Product not found: " + item.getProductId()));
+            lines.add(new OrderLineDraft(item.getProductId(), item.getQuantity(), product.price()));
+        }
 
-        List<OrderItemEventDto> eventItems = saved.getItems().stream()
-                .map(item -> new OrderItemEventDto(item.getProductId().toString(), item.getQuantity()))
-                .collect(Collectors.toList());
-        OrderCreatedPayload payload = new OrderCreatedPayload(
-                saved.getId().toString(),
-                saved.getCustomerId().toString(),
-                eventItems,
-                saved.getTotalAmount()
-        );
-        orderEventProducer.publish("OrderCreatedEvent", payload);
-
-        return toResponse(saved);
-    }
-
-    public OrderResponse getOrderById(UUID orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new OrderNotFoundException(orderId));
+        Order order = Order.place(request.getCustomerId(), lines);
+        orderRepository.save(order);
+        publishAfterCommit(order.pullEvents());
         return toResponse(order);
     }
 
+    @Transactional(readOnly = true)
+    public OrderResponse getOrderById(UUID orderId) {
+        return toResponse(load(orderId));
+    }
+
+    @Transactional(readOnly = true)
     public List<OrderResponse> getOrdersByCustomer(UUID customerId) {
-        return orderRepository.findByCustomerId(customerId).stream()
-                .map(this::toResponse)
-                .collect(Collectors.toList());
+        return orderRepository.findByCustomerId(customerId).stream().map(this::toResponse).toList();
     }
 
+    /** Inventory reserved the stock for this order. */
+    @Transactional
     public void confirmOrder(UUID orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new OrderNotFoundException(orderId));
-
-        order.setStatus("CONFIRMED");
-        order.setUpdatedAt(Instant.now());
-        Order saved = orderRepository.save(order);
-
-        List<OrderItemEventDto> eventItems = saved.getItems().stream()
-                .map(item -> new OrderItemEventDto(item.getProductId().toString(), item.getQuantity()))
-                .collect(Collectors.toList());
-        OrderConfirmedPayload payload = new OrderConfirmedPayload(
-                saved.getId().toString(),
-                saved.getCustomerId().toString(),
-                eventItems
-        );
-        orderEventProducer.publish("OrderConfirmedEvent", payload);
+        Order order = load(orderId);
+        if (order.confirm()) {
+            publishAfterCommit(order.pullEvents());
+        } else {
+            log.info("Ignoring stock reservation for order {}: status is {}", orderId, order.getStatus());
+        }
     }
 
+    /** Inventory could not reserve the stock; the rejection is a dead end (no event leaves this service). */
+    @Transactional
     public void rejectOrder(UUID orderId, String reason) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new OrderNotFoundException(orderId));
-
-        order.setStatus("REJECTED");
-        order.setRejectionReason(reason);
-        order.setUpdatedAt(Instant.now());
-        orderRepository.save(order);
+        Order order = load(orderId);
+        if (order.reject(reason)) {
+            publishAfterCommit(order.pullEvents());
+        } else {
+            log.info("Ignoring stock rejection for order {}: status is {}", orderId, order.getStatus());
+        }
     }
 
+    /**
+     * The single entry point for cancelling an order. The REST endpoint and the cancellation AI agent both call
+     * this method, so the eligibility rule exists exactly once ({@link CancellationPolicy}).
+     */
+    @Transactional
     public OrderResponse cancelOrder(UUID orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new OrderNotFoundException(orderId));
+        Order order = load(orderId);
+        cancellationPolicy.verifyCancellable(order, () -> shipmentGateway.findShipmentStatus(orderId));
+        order.cancel();
+        publishAfterCommit(order.pullEvents());
+        return toResponse(order);
+    }
 
-        if (order.getStatus().equals("SHIPPED") || order.getStatus().equals("COMPLETED")
-                || order.getStatus().equals("CANCELLED")) {
-            throw new OrderCancellationNotAllowedException(
-                    "Cannot cancel order " + orderId + ": already " + order.getStatus());
+    private Order load(UUID orderId) {
+        return orderRepository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
+    }
+
+    /** Events leave the service only once the database change is durable. */
+    private void publishAfterCommit(List<DomainEvent> events) {
+        if (events.isEmpty()) {
+            return;
         }
-
-        String shipmentStatus = shippingServiceClient.getShipmentStatus(orderId);
-        if (shipmentStatus != null && NOT_YET_DISPATCHED_STATUSES.contains(shipmentStatus)) {
-            throw new OrderCancellationNotAllowedException(
-                    "Cannot cancel order " + orderId + ": shipment already " + shipmentStatus);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    eventPublisher.publish(events);
+                }
+            });
+        } else {
+            eventPublisher.publish(events);
         }
-
-        String previousStatus = order.getStatus();
-        order.setStatus("CANCELLED");
-        order.setUpdatedAt(Instant.now());
-        Order saved = orderRepository.save(order);
-
-        List<OrderItemEventDto> eventItems = saved.getItems().stream()
-                .map(item -> new OrderItemEventDto(item.getProductId().toString(), item.getQuantity()))
-                .collect(Collectors.toList());
-        OrderCancelledPayload payload = new OrderCancelledPayload(
-                saved.getId().toString(), eventItems, previousStatus);
-        orderEventProducer.publish("OrderCancelledEvent", payload);
-
-        return toResponse(saved);
     }
 
     private OrderResponse toResponse(Order order) {
-        List<OrderItemResponse> itemResponses = order.getItems().stream()
-                .map(item -> new OrderItemResponse(item.getProductId(), item.getQuantity(), item.getUnitPrice()))
-                .collect(Collectors.toList());
-        return new OrderResponse(order.getId(), order.getStatus(), order.getTotalAmount(), itemResponses);
+        List<OrderItemResponse> items = order.getItems().stream()
+                .map(i -> new OrderItemResponse(i.getProductId(), i.getQuantity(), i.getUnitPrice().amount()))
+                .toList();
+        return new OrderResponse(order.getId(), order.getStatus().name(), order.getTotalAmount().amount(), items);
     }
 }

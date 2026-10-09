@@ -5,7 +5,8 @@ production/consumption, and two LangChain4j-powered conversational AI agents.
 
 ## What this service does
 
-- Create and view orders (`Order` + `OrderItem` entities, backed by H2)
+- Create and view orders (`Order` aggregate with its `OrderItem`s, backed by H2). Creating an order **checks that the
+  customer and every product exist and prices each line from the Inventory Service** (no client-supplied prices)
 - Publish order lifecycle events to Kafka (`OrderCreatedEvent`, `OrderConfirmedEvent`,
   `OrderCancelledEvent`) on the `order-events` topic
 - Consume inventory responses from Kafka (`InventoryReservedEvent`,
@@ -23,7 +24,8 @@ production/consumption, and two LangChain4j-powered conversational AI agents.
 
 - Java 21, Spring Boot 3.2.5
 - Spring Data JPA + H2 (in-memory, `order_db`)
-- Spring Kafka
+- Spring Cloud Stream 4.1.x with the Kafka binder (functional style: a `Consumer<String>` bean for input,
+  `StreamBridge` for output)
 - LangChain4j 1.3.0 + `langchain4j-open-ai` (pointed at Groq's OpenAI-compatible API)
 - RestTemplate for synchronous calls to Inventory Service and Shipping Service
 
@@ -62,9 +64,12 @@ Other config, already set correctly for local dev, no changes needed:
 | Property | Value | Used for |
 |---|---|---|
 | `server.port` | `8081` | this service's own port |
-| `spring.kafka.bootstrap-servers` | `localhost:9092` | matches `docker-compose.yml` |
+| `spring.cloud.stream.kafka.binder.brokers` | `localhost:9092` | matches `docker-compose.yml` |
+| `spring.cloud.stream.bindings.inventoryEvents-in-0` | topic `inventory-events`, group `order-service` | input binding for `InventoryEventConsumer` (bean `inventoryEvents`) |
+| `spring.cloud.stream.bindings.orderEvents-out-0` | topic `order-events` | output binding used by `KafkaOrderEventPublisher` via `StreamBridge` |
 | `shipping-service.base-url` | `http://localhost:8083` | cancellation's shipment-status check |
-| `product-service.base-url` | `http://localhost:8082` | AI agent's product lookup tool |
+| `product-service.base-url` | `http://localhost:8082` | product price/existence check when creating an order, and the AI agent's product lookup |
+| `customer-service.base-url` | `http://localhost:8084` | customer existence check when creating an order |
 | `groq.base-url` | `https://api.groq.com/openai/v1` | Groq's OpenAI-compatible endpoint |
 | `groq.model-name` | `llama-3.1-8b-instant` | which Groq-hosted model to use |
 
@@ -96,29 +101,58 @@ blank password.
 
 ## REST endpoints
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/orders` | Create an order |
-| GET | `/orders/{orderId}` | Get one order (404 if not found) |
-| GET | `/orders?customerId={id}` | Get all orders for a customer |
-| POST | `/orders/{orderId}/cancel` | Cancel an order (409 if not allowed) |
-| POST | `/agents/product-consult` | Chat with the product-consultation agent |
-| POST | `/agents/cancel-support` | Chat with the cancellation-support agent |
+| Method | Path | Purpose | Error responses |
+|---|---|---|---|
+| POST | `/orders` | Create an order | `400` unknown customer/product, empty items, quantity ≤ 0; `503` Inventory/Customer unreachable |
+| GET | `/orders/{orderId}` | Get one order | `404` |
+| GET | `/orders?customerId={id}` | Get all orders for a customer | – (empty list allowed) |
+| POST | `/orders/{orderId}/cancel` | Cancel an order | `404`; `409` not cancellable; `503` Shipping unreachable |
+| POST | `/agents/product-consult` | Chat with the product-consultation agent | – (fallback text if the LLM is unavailable) |
+| POST | `/agents/cancel-support` | Chat with the cancellation-support agent | – (fallback text if the LLM is unavailable) |
 
-Example — create an order:
+Example — create an order (the customer and product must exist; create them first in Customer / Inventory Service):
 ```bash
-curl -X POST http://localhost:8081/orders \
-  -H "Content-Type: application/json" \
-  -d '{"customerId":"a1b2c3d4-0000-0000-0000-000000000001","items":[{"productId":"b2c3d4e5-0000-0000-0000-000000000002","quantity":2}]}'
+curl -X POST http://localhost:8081/orders   -H "Content-Type: application/json"   -d '{"customerId":"<customerId>","items":[{"productId":"<productId>","quantity":2}]}'
+# -> 201 {"orderId":"...","status":"PENDING","totalAmount":159.98,"items":[{"productId":"...","quantity":2,"unitPrice":79.99}]}
 ```
 
-Example — chat with the product agent (needs a real `GROQ_API_KEY` to get a
-real answer; otherwise returns the fallback message):
+Example — chat with the product agent (needs a real `GROQ_API_KEY` to get a real answer; otherwise returns the
+fallback message):
 ```bash
-curl -X POST http://localhost:8081/agents/product-consult \
-  -H "Content-Type: application/json" \
-  -d '{"message":"Do you have any wireless headphones under $100?"}'
+curl -X POST http://localhost:8081/agents/product-consult   -H "Content-Type: application/json"   -d '{"message":"Do you have any wireless headphones under $100?"}'
 ```
+
+## Code structure
+
+```
+com.ecommerce.order
+├── presentation.controller   OrderController, AgentController, ApiExceptionHandler (@RestControllerAdvice)
+├── presentation.dto          AgentChatRequest / AgentChatResponse
+├── service                   OrderService (use cases: create, get, confirm, reject, cancel)
+├── service.dto               CreateOrderRequest, OrderResponse, ...
+├── service.agent             ProductConsultAgent, CancelSupportAgent (LangChain4j interfaces) + their @Tool classes
+├── domain.model              Order (aggregate root), OrderItem, OrderStatus, Money (value object), OrderLineDraft
+├── domain.event              OrderPlaced / OrderConfirmed / OrderCancelled / OrderRejected (domain events)
+├── domain.service            CancellationPolicy (the single cancellation rule)
+├── domain.repository         OrderRepository (port)
+├── domain.port               ProductCatalog, CustomerDirectory, ShipmentGateway, OrderEventPublisher (ports)
+├── domain.exception          OrderNotFound, OrderCancellationNotAllowed, InvalidOrder, ExternalServiceUnavailable
+└── infrastructure
+    ├── persistence           JpaOrderRepository + OrderRepositoryAdapter (Spring Data)
+    ├── messaging             InventoryEventConsumer, KafkaOrderEventPublisher (Spring Cloud Stream) + .dto payloads
+    ├── client                InventoryServiceClient, CustomerServiceClient, ShippingServiceClient (REST adapters)
+    └── config                RestTemplateConfig (timeouts), DomainConfig, LangChain4jConfig
+```
+
+The cancellation rule exists **once**: `CancellationPolicy`, reached through `OrderService.cancelOrder()` — the REST
+endpoint and the cancel-support agent's `OrderCancelTool` both call that method.
+
+## Tests
+`mvn -pl order-service test` — no Kafka or network needed.
+- `OrderTest`, `MoneyAndPolicyTest` — the aggregate, value object and cancellation policy in isolation.
+- `OrderServiceTest` — the use cases against in-memory fakes of every port.
+- `OrderMessagingTest` — full Spring context with the real Spring Cloud Stream bindings on the in-memory test
+  binder: verifies the exact JSON published on `order-events` and the reaction to `inventory-events`.
 
 ## Kafka
 
@@ -141,28 +175,24 @@ Wire format: every message is a JSON envelope —
 ```json
 {"eventType": "...", "eventId": "<uuid>", "timestamp": "<ISO-8601>", "payload": {...}}
 ```
-built and parsed manually via Jackson's `ObjectMapper` (`KafkaTemplate<String,String>`),
-not Spring Kafka's `JsonSerializer` — this matches the pattern already used by
-`inventory-service` and `shipping-service`, for wire-format consistency across
-all three services.
+built and parsed manually via Jackson's `ObjectMapper`: `KafkaOrderEventPublisher` translates the domain events into the envelope, serializes it to a JSON
+string and sends it with Spring Cloud Stream's `StreamBridge` (binding `orderEvents-out-0`), and
+`InventoryEventConsumer` is a `Consumer<String>` bean that parses the string (binding `inventoryEvents-in-0`).
+Events are published only **after the database transaction commits**.
+It does not use a Spring JSON serializer — this matches the pattern used by `inventory-service` and
+`shipping-service`, for wire-format consistency across all three services. Topics and consumer groups live in
+`application.yml`, not in code.
 
 ## Known limitations
 
-- **`unitPrice` is hardcoded** to `74.99` for every order item — there's no real
-  price lookup from Inventory Service at order-creation time (only the AI agent's
-  product-search tool actually queries real prices). This means `totalAmount`
-  and the Kafka Streams revenue aggregate in `inventory-service` don't reflect
-  real product prices.
-- **`OrderRejectedPayload` is built but never published anywhere** — the task
-  spec itself is inconsistent about this (one part says it should be published
-  from `rejectOrder()`, the acceptance criteria for that same method says no
-  event should be published on rejection). We followed the acceptance criteria,
-  since that's the testable contract; the payload class exists but is dead code.
-- **The AI agents need a real `GROQ_API_KEY`** to do anything beyond return a
-  fixed fallback message — without one, every `/agents/*` call fails Groq's
-  auth check and gets caught by a fallback handler, returning HTTP 200 with an
-  apology message rather than a 500. Order creation, Kafka events, and
-  cancellation logic are completely independent of this and work with no key at all.
-- **No automated tests** — everything above was verified via live manual testing
-  (real HTTP calls, real Kafka messages, real running `inventory-service`/
-  `shipping-service`) during development, not via a JUnit suite.
+- **The AI agents need a real `GROQ_API_KEY`** to do anything beyond return a fixed fallback message — without one,
+  every `/agents/*` call fails Groq's auth check and gets caught by a fallback handler, returning HTTP 200 with an
+  apology message rather than a 500. Order creation, Kafka events, and cancellation logic are independent of this.
+- **Rejection is a dead end by design:** when Inventory rejects an order the status becomes `REJECTED` with a reason and
+  nothing is published (the original task spec contradicted itself; the acceptance criteria were followed). The domain
+  still raises an internal `OrderRejected` event, which the publisher deliberately drops.
+- **No transactional outbox:** events are sent right after the commit; a crash in that instant would lose the event
+  and leave the order `PENDING`.
+- **A stock reply for an order that is no longer `PENDING` is ignored** (e.g. it was cancelled while waiting), which
+  means stock reserved for such an order is only released by the `OrderCancelledEvent`, as designed.
+- `SHIPPED` and `COMPLETED` exist as statuses but nothing sets them yet.

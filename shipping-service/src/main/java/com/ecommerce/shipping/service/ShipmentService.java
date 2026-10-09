@@ -1,26 +1,23 @@
 package com.ecommerce.shipping.service;
 
-import com.ecommerce.shipping.dto.ShipmentResponse;
-import com.ecommerce.shipping.entity.Shipment;
-import com.ecommerce.shipping.exception.InvalidShipmentStatusException;
-import com.ecommerce.shipping.exception.ShipmentNotFoundException;
-import com.ecommerce.shipping.repository.ShipmentRepository;
+import com.ecommerce.shipping.domain.exception.ShipmentNotFoundException;
+import com.ecommerce.shipping.domain.model.Shipment;
+import com.ecommerce.shipping.domain.model.ShipmentStatus;
+import com.ecommerce.shipping.domain.repository.ShipmentRepository;
+import com.ecommerce.shipping.service.dto.ShipmentResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Instant;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+/** Application service for shipments. Rules live in {@link Shipment}; this class loads, calls and saves. */
 @Service
 public class ShipmentService {
 
     private static final Logger log = LoggerFactory.getLogger(ShipmentService.class);
-
-    private static final List<String> VALID_STATUSES =
-        List.of("CREATED", "DISPATCHED", "IN_TRANSIT", "DELIVERED", "CANCELLED");
 
     private final ShipmentRepository shipmentRepository;
 
@@ -28,61 +25,51 @@ public class ShipmentService {
         this.shipmentRepository = shipmentRepository;
     }
 
+    @Transactional(readOnly = true)
     public ShipmentResponse getShipmentByOrderId(UUID orderId) {
-        Shipment shipment = shipmentRepository.findByOrderId(orderId)
-            .orElseThrow(() -> new ShipmentNotFoundException(orderId));
-        return mapToResponse(shipment);
+        return toResponse(load(orderId));
     }
 
+    @Transactional
     public ShipmentResponse updateStatus(UUID orderId, String newStatus) {
-        Shipment shipment = shipmentRepository.findByOrderId(orderId)
-            .orElseThrow(() -> new ShipmentNotFoundException(orderId));
-
-        if (!VALID_STATUSES.contains(newStatus)) {
-            throw new InvalidShipmentStatusException("Unknown status: " + newStatus);
-        }
-
-        shipment.setStatus(newStatus);
-        shipment.setUpdatedAt(Instant.now());
-        Shipment saved = shipmentRepository.save(shipment);
-        return mapToResponse(saved);
+        Shipment shipment = load(orderId);
+        shipment.changeStatus(ShipmentStatus.parse(newStatus));
+        return toResponse(shipmentRepository.save(shipment));
     }
 
+    /** Creates the shipment for a confirmed order. A duplicate OrderConfirmedEvent is ignored (idempotent). */
+    @Transactional
     public Shipment createShipment(UUID orderId) {
-        // Check for duplicate - if shipment already exists, log and return existing
-        // to handle duplicate OrderConfirmedEvent gracefully
         Optional<Shipment> existing = shipmentRepository.findByOrderId(orderId);
         if (existing.isPresent()) {
             log.info("Shipment already exists for orderId={}, ignoring duplicate event", orderId);
             return existing.get();
         }
-        Instant now = Instant.now();
-        Shipment shipment = new Shipment();
-        shipment.setOrderId(orderId);
-        shipment.setStatus("CREATED");
-        shipment.setCreatedAt(now);
-        shipment.setUpdatedAt(now);
-        return shipmentRepository.save(shipment);
+        return shipmentRepository.save(Shipment.createFor(orderId));
     }
 
+    /** Cancels the shipment of a cancelled order if it has not left the warehouse. Never throws. */
+    @Transactional
     public void cancelIfNotDispatched(UUID orderId) {
         Optional<Shipment> optional = shipmentRepository.findByOrderId(orderId);
         if (optional.isEmpty()) {
-            log.info("No shipment found for orderId={} during cancellation — order was cancelled before any shipment existed", orderId);
+            log.info("No shipment found for orderId={} during cancellation - order was cancelled before any shipment existed", orderId);
             return;
         }
         Shipment shipment = optional.get();
-        if ("CREATED".equals(shipment.getStatus())) {
-            shipment.setStatus("CANCELLED");
-            shipment.setUpdatedAt(Instant.now());
+        if (shipment.cancelIfNotDispatched()) {
             shipmentRepository.save(shipment);
             log.info("Shipment for orderId={} cancelled successfully", orderId);
         } else {
-            log.warn("Shipment for orderId={} has status={} — cannot cancel; skipping", orderId, shipment.getStatus());
+            log.warn("Shipment for orderId={} has status={} - cannot cancel; skipping", orderId, shipment.getStatus());
         }
     }
 
-    private ShipmentResponse mapToResponse(Shipment shipment) {
-        return new ShipmentResponse(shipment.getOrderId().toString(), shipment.getStatus());
+    private Shipment load(UUID orderId) {
+        return shipmentRepository.findByOrderId(orderId).orElseThrow(() -> new ShipmentNotFoundException(orderId));
+    }
+
+    private static ShipmentResponse toResponse(Shipment shipment) {
+        return new ShipmentResponse(shipment.getOrderId().toString(), shipment.getStatus().name());
     }
 }

@@ -7,11 +7,11 @@
   },
   "item": [
     {
-      "name": "Order Service",
-      "description": "Order Service endpoints (port 8081)",
+      "name": "Customer Service",
+      "description": "Customer Service endpoints (port 8084) — Member 3 Tasks 3.3 & 3.4",
       "item": [
         {
-          "name": "Create Order",
+          "name": "Create Customer",
           "event": [
             {
               "listen": "test",
@@ -19,8 +19,8 @@
                 "exec": [
                   "if (pm.response.code === 201) {",
                   "    var json = pm.response.json();",
-                  "    pm.environment.set('lastOrderId', json.orderId);",
-                  "    console.log('Saved lastOrderId: ' + json.orderId);",
+                  "    pm.environment.set('lastCustomerId', json.customerId);",
+                  "    console.log('Saved lastCustomerId: ' + json.customerId);",
                   "}"
                 ],
                 "type": "text/javascript"
@@ -30,95 +30,158 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"customerId\": \"a1b2c3d4-0000-0000-0000-000000000001\",\n  \"items\": [\n    { \"productId\": \"b2c3d4e5-0000-0000-0000-000000000002\", \"quantity\": 2 }\n  ]\n}"
+              "raw": "{\n  \"name\": \"Jane Doe\",\n  \"email\": \"jane@example.com\"\n}"
             },
             "url": {
-              "raw": "{{orderServiceUrl}}/orders",
-              "host": ["{{orderServiceUrl}}"],
-              "path": ["orders"]
-            },
-            "description": "Creates a new order. Saves orderId to {{lastOrderId}} for chained requests."
-          }
-        },
-        {
-          "name": "Get Order",
-          "request": {
-            "method": "GET",
-            "url": {
-              "raw": "{{orderServiceUrl}}/orders/{{lastOrderId}}",
-              "host": ["{{orderServiceUrl}}"],
-              "path": ["orders", "{{lastOrderId}}"]
-            },
-            "description": "Get a single order by ID"
-          }
-        },
-        {
-          "name": "Get Orders by Customer",
-          "request": {
-            "method": "GET",
-            "url": {
-              "raw": "{{orderServiceUrl}}/orders?customerId=a1b2c3d4-0000-0000-0000-000000000001",
-              "host": ["{{orderServiceUrl}}"],
-              "path": ["orders"],
-              "query": [
-                { "key": "customerId", "value": "a1b2c3d4-0000-0000-0000-000000000001" }
+              "raw": "{{customerServiceUrl}}/customers",
+              "host": [
+                "{{customerServiceUrl}}"
+              ],
+              "path": [
+                "customers"
               ]
             },
-            "description": "Get all orders for a specific customer"
+            "description": "Create a new customer. Email must be unique. Saves customerId to {{lastCustomerId}}."
           }
         },
         {
-          "name": "Cancel Order",
+          "name": "Get Customer",
           "request": {
-            "method": "POST",
+            "method": "GET",
             "url": {
-              "raw": "{{orderServiceUrl}}/orders/{{lastOrderId}}/cancel",
-              "host": ["{{orderServiceUrl}}"],
-              "path": ["orders", "{{lastOrderId}}", "cancel"]
+              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}",
+              "host": [
+                "{{customerServiceUrl}}"
+              ],
+              "path": [
+                "customers",
+                "{{lastCustomerId}}"
+              ]
             },
-            "description": "Cancel an order. Returns 409 if shipment is already dispatched."
+            "description": "Get a customer by ID. Returns 404 if not found."
           }
         },
         {
-          "name": "Agent - Product Consult",
+          "name": "Update Customer",
           "request": {
-            "method": "POST",
+            "method": "PUT",
             "header": [
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"message\": \"Do you have any wireless headphones under $100?\"\n}"
+              "raw": "{\n  \"name\": \"Jane Smith\"\n}"
             },
             "url": {
-              "raw": "{{orderServiceUrl}}/agents/product-consult",
-              "host": ["{{orderServiceUrl}}"],
-              "path": ["agents", "product-consult"]
+              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}",
+              "host": [
+                "{{customerServiceUrl}}"
+              ],
+              "path": [
+                "customers",
+                "{{lastCustomerId}}"
+              ]
             },
-            "description": "AI agent for product consultation — searches real inventory and answers customer questions."
+            "description": "Update customer fields (partial update — only provided fields are changed)."
           }
         },
         {
-          "name": "Agent - Cancel Support",
+          "name": "Submit Feedback",
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"message\": \"I want to cancel my order {{lastOrderId}}\"\n}"
+              "raw": "{\n  \"content\": \"Great product! Very fast delivery.\",\n  \"rating\": 5\n}"
             },
             "url": {
-              "raw": "{{orderServiceUrl}}/agents/cancel-support",
-              "host": ["{{orderServiceUrl}}"],
-              "path": ["agents", "cancel-support"]
+              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}/feedback",
+              "host": [
+                "{{customerServiceUrl}}"
+              ],
+              "path": [
+                "customers",
+                "{{lastCustomerId}}",
+                "feedback"
+              ]
             },
-            "description": "AI agent for order cancellation support."
+            "description": "Submit feedback for a customer. Rating is optional (1-5 recommended). Returns 404 if customer not found."
+          }
+        },
+        {
+          "name": "Submit Complaint",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    var json = pm.response.json();",
+                  "    pm.environment.set('lastComplaintId', json.complaintId);",
+                  "    console.log('Saved lastComplaintId: ' + json.complaintId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"My order arrived damaged. Requesting a replacement.\"\n}"
+            },
+            "url": {
+              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}/complaints",
+              "host": [
+                "{{customerServiceUrl}}"
+              ],
+              "path": [
+                "customers",
+                "{{lastCustomerId}}",
+                "complaints"
+              ]
+            },
+            "description": "Submit a complaint. Initially set to status=OPEN. Returns 201 with complaint details."
+          }
+        },
+        {
+          "name": "Get Complaints",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}/complaints",
+              "host": [
+                "{{customerServiceUrl}}"
+              ],
+              "path": [
+                "customers",
+                "{{lastCustomerId}}",
+                "complaints"
+              ]
+            },
+            "description": "Get all complaints for a customer. Returns empty array if none, not an error."
           }
         }
       ]
@@ -147,7 +210,10 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
@@ -155,8 +221,12 @@
             },
             "url": {
               "raw": "{{inventoryServiceUrl}}/products",
-              "host": ["{{inventoryServiceUrl}}"],
-              "path": ["products"]
+              "host": [
+                "{{inventoryServiceUrl}}"
+              ],
+              "path": [
+                "products"
+              ]
             },
             "description": "Create a new product. Saves productId to {{lastProductId}}."
           }
@@ -166,7 +236,10 @@
           "request": {
             "method": "PUT",
             "header": [
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
@@ -174,22 +247,15 @@
             },
             "url": {
               "raw": "{{inventoryServiceUrl}}/products/{{lastProductId}}",
-              "host": ["{{inventoryServiceUrl}}"],
-              "path": ["products", "{{lastProductId}}"]
+              "host": [
+                "{{inventoryServiceUrl}}"
+              ],
+              "path": [
+                "products",
+                "{{lastProductId}}"
+              ]
             },
             "description": "Update product details (partial update — only provided fields are changed)."
-          }
-        },
-        {
-          "name": "Delete Product",
-          "request": {
-            "method": "DELETE",
-            "url": {
-              "raw": "{{inventoryServiceUrl}}/products/{{lastProductId}}",
-              "host": ["{{inventoryServiceUrl}}"],
-              "path": ["products", "{{lastProductId}}"]
-            },
-            "description": "Delete a product by ID. Returns 204 No Content."
           }
         },
         {
@@ -198,10 +264,18 @@
             "method": "GET",
             "url": {
               "raw": "{{inventoryServiceUrl}}/products?search=",
-              "host": ["{{inventoryServiceUrl}}"],
-              "path": ["products"],
+              "host": [
+                "{{inventoryServiceUrl}}"
+              ],
+              "path": [
+                "products"
+              ],
               "query": [
-                { "key": "search", "value": "", "description": "Optional keyword to filter by name (case-insensitive)" }
+                {
+                  "key": "search",
+                  "value": "",
+                  "description": "Optional keyword to filter by name (case-insensitive)"
+                }
               ]
             },
             "description": "List all products. Pass ?search=keyword to filter by name."
@@ -213,8 +287,13 @@
             "method": "GET",
             "url": {
               "raw": "{{inventoryServiceUrl}}/products/{{lastProductId}}",
-              "host": ["{{inventoryServiceUrl}}"],
-              "path": ["products", "{{lastProductId}}"]
+              "host": [
+                "{{inventoryServiceUrl}}"
+              ],
+              "path": [
+                "products",
+                "{{lastProductId}}"
+              ]
             },
             "description": "Get a single product by ID"
           }
@@ -225,10 +304,19 @@
             "method": "GET",
             "url": {
               "raw": "{{inventoryServiceUrl}}/analytics/low-stock?threshold=10",
-              "host": ["{{inventoryServiceUrl}}"],
-              "path": ["analytics", "low-stock"],
+              "host": [
+                "{{inventoryServiceUrl}}"
+              ],
+              "path": [
+                "analytics",
+                "low-stock"
+              ],
               "query": [
-                { "key": "threshold", "value": "10", "description": "Default is 10" }
+                {
+                  "key": "threshold",
+                  "value": "10",
+                  "description": "Default is 10"
+                }
               ]
             },
             "description": "Get products where available stock (stockQuantity - reservedQuantity) is below threshold."
@@ -240,10 +328,200 @@
             "method": "GET",
             "url": {
               "raw": "{{inventoryServiceUrl}}/analytics/revenue",
-              "host": ["{{inventoryServiceUrl}}"],
-              "path": ["analytics", "revenue"]
+              "host": [
+                "{{inventoryServiceUrl}}"
+              ],
+              "path": [
+                "analytics",
+                "revenue"
+              ]
             },
             "description": "Get the total revenue from all OrderCreatedEvents processed via Kafka Streams."
+          }
+        },
+        {
+          "name": "Trending Products Report",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{inventoryServiceUrl}}/analytics/trending-products?minutes=10&limit=5",
+              "host": [
+                "{{inventoryServiceUrl}}"
+              ],
+              "path": [
+                "analytics",
+                "trending-products"
+              ],
+              "query": [
+                {
+                  "key": "minutes",
+                  "value": "10"
+                },
+                {
+                  "key": "limit",
+                  "value": "5"
+                }
+              ]
+            },
+            "description": "Products ordered most in the last N minutes, from the Kafka Streams 'demand' topology (5-minute tumbling windows over OrderCreatedEvents)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Order Service",
+      "description": "Order Service endpoints (port 8081)",
+      "item": [
+        {
+          "name": "Create Order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    var json = pm.response.json();",
+                  "    pm.environment.set('lastOrderId', json.orderId);",
+                  "    console.log('Saved lastOrderId: ' + json.orderId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"{{lastCustomerId}}\",\n  \"items\": [\n    { \"productId\": \"{{lastProductId}}\", \"quantity\": 2 }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{orderServiceUrl}}/orders",
+              "host": [
+                "{{orderServiceUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Needs a real customer and product: run 'Create Customer' and 'Create Product' first (this collection does, in order). The unit price is taken from the product, so total = quantity x product price."
+          }
+        },
+        {
+          "name": "Get Order",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{orderServiceUrl}}/orders/{{lastOrderId}}",
+              "host": [
+                "{{orderServiceUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{lastOrderId}}"
+              ]
+            },
+            "description": "Get a single order by ID"
+          }
+        },
+        {
+          "name": "Get Orders by Customer",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{orderServiceUrl}}/orders?customerId={{lastCustomerId}}",
+              "host": [
+                "{{orderServiceUrl}}"
+              ],
+              "path": [
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "customerId",
+                  "value": "{{lastCustomerId}}"
+                }
+              ]
+            },
+            "description": "Get all orders for a specific customer"
+          }
+        },
+        {
+          "name": "Cancel Order",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{orderServiceUrl}}/orders/{{lastOrderId}}/cancel",
+              "host": [
+                "{{orderServiceUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{lastOrderId}}",
+                "cancel"
+              ]
+            },
+            "description": "Cancel an order. Returns 409 if shipment is already dispatched."
+          }
+        },
+        {
+          "name": "Agent - Product Consult",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Do you have any wireless headphones under $100?\"\n}"
+            },
+            "url": {
+              "raw": "{{orderServiceUrl}}/agents/product-consult",
+              "host": [
+                "{{orderServiceUrl}}"
+              ],
+              "path": [
+                "agents",
+                "product-consult"
+              ]
+            },
+            "description": "AI agent for product consultation — searches real inventory and answers customer questions."
+          }
+        },
+        {
+          "name": "Agent - Cancel Support",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"I want to cancel my order {{lastOrderId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{orderServiceUrl}}/agents/cancel-support",
+              "host": [
+                "{{orderServiceUrl}}"
+              ],
+              "path": [
+                "agents",
+                "cancel-support"
+              ]
+            },
+            "description": "AI agent for order cancellation support."
           }
         }
       ]
@@ -258,8 +536,13 @@
             "method": "GET",
             "url": {
               "raw": "{{shippingServiceUrl}}/shipments/{{lastOrderId}}",
-              "host": ["{{shippingServiceUrl}}"],
-              "path": ["shipments", "{{lastOrderId}}"]
+              "host": [
+                "{{shippingServiceUrl}}"
+              ],
+              "path": [
+                "shipments",
+                "{{lastOrderId}}"
+              ]
             },
             "description": "Get shipment status for an order. Returns 404 if no shipment exists yet (expected — order not confirmed yet)."
           }
@@ -269,7 +552,10 @@
           "request": {
             "method": "PATCH",
             "header": [
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
@@ -277,8 +563,14 @@
             },
             "url": {
               "raw": "{{shippingServiceUrl}}/shipments/{{lastOrderId}}/status",
-              "host": ["{{shippingServiceUrl}}"],
-              "path": ["shipments", "{{lastOrderId}}", "status"]
+              "host": [
+                "{{shippingServiceUrl}}"
+              ],
+              "path": [
+                "shipments",
+                "{{lastOrderId}}",
+                "status"
+              ]
             },
             "description": "Manually update a shipment's status. Valid values: CREATED, DISPATCHED, IN_TRANSIT, DELIVERED, CANCELLED. Returns 400 for invalid status."
           }
@@ -286,137 +578,23 @@
       ]
     },
     {
-      "name": "Customer Service",
-      "description": "Customer Service endpoints (port 8084) — Member 3 Tasks 3.3 & 3.4",
+      "name": "Cleanup",
       "item": [
         {
-          "name": "Create Customer",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 201) {",
-                  "    var json = pm.response.json();",
-                  "    pm.environment.set('lastCustomerId', json.customerId);",
-                  "    console.log('Saved lastCustomerId: ' + json.customerId);",
-                  "}"
-                ],
-                "type": "text/javascript"
-              }
-            }
-          ],
+          "name": "Delete Product",
           "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Jane Doe\",\n  \"email\": \"jane@example.com\"\n}"
-            },
+            "method": "DELETE",
             "url": {
-              "raw": "{{customerServiceUrl}}/customers",
-              "host": ["{{customerServiceUrl}}"],
-              "path": ["customers"]
+              "raw": "{{inventoryServiceUrl}}/products/{{lastProductId}}",
+              "host": [
+                "{{inventoryServiceUrl}}"
+              ],
+              "path": [
+                "products",
+                "{{lastProductId}}"
+              ]
             },
-            "description": "Create a new customer. Email must be unique. Saves customerId to {{lastCustomerId}}."
-          }
-        },
-        {
-          "name": "Get Customer",
-          "request": {
-            "method": "GET",
-            "url": {
-              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}",
-              "host": ["{{customerServiceUrl}}"],
-              "path": ["customers", "{{lastCustomerId}}"]
-            },
-            "description": "Get a customer by ID. Returns 404 if not found."
-          }
-        },
-        {
-          "name": "Update Customer",
-          "request": {
-            "method": "PUT",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Jane Smith\"\n}"
-            },
-            "url": {
-              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}",
-              "host": ["{{customerServiceUrl}}"],
-              "path": ["customers", "{{lastCustomerId}}"]
-            },
-            "description": "Update customer fields (partial update — only provided fields are changed)."
-          }
-        },
-        {
-          "name": "Submit Feedback",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"content\": \"Great product! Very fast delivery.\",\n  \"rating\": 5\n}"
-            },
-            "url": {
-              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}/feedback",
-              "host": ["{{customerServiceUrl}}"],
-              "path": ["customers", "{{lastCustomerId}}", "feedback"]
-            },
-            "description": "Submit feedback for a customer. Rating is optional (1-5 recommended). Returns 404 if customer not found."
-          }
-        },
-        {
-          "name": "Submit Complaint",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 201) {",
-                  "    var json = pm.response.json();",
-                  "    pm.environment.set('lastComplaintId', json.complaintId);",
-                  "    console.log('Saved lastComplaintId: ' + json.complaintId);",
-                  "}"
-                ],
-                "type": "text/javascript"
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"content\": \"My order arrived damaged. Requesting a replacement.\"\n}"
-            },
-            "url": {
-              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}/complaints",
-              "host": ["{{customerServiceUrl}}"],
-              "path": ["customers", "{{lastCustomerId}}", "complaints"]
-            },
-            "description": "Submit a complaint. Initially set to status=OPEN. Returns 201 with complaint details."
-          }
-        },
-        {
-          "name": "Get Complaints",
-          "request": {
-            "method": "GET",
-            "url": {
-              "raw": "{{customerServiceUrl}}/customers/{{lastCustomerId}}/complaints",
-              "host": ["{{customerServiceUrl}}"],
-              "path": ["customers", "{{lastCustomerId}}", "complaints"]
-            },
-            "description": "Get all complaints for a customer. Returns empty array if none, not an error."
+            "description": "Delete a product by ID. Returns 204 No Content."
           }
         }
       ]

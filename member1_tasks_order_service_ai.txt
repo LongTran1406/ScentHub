@@ -1,4 +1,81 @@
 =================================================
+REVISION NOTES (2026-10-08) - read before using the task text below
+=================================================
+- MESSAGING FRAMEWORK: the course specification makes Spring Cloud Stream a MANDATORY dependency. The original plan
+  below said "Spring Cloud Stream / spring-kafka" and its code samples use spring-kafka (@KafkaListener,
+  KafkaTemplate). All services were migrated to Spring Cloud Stream (functional style, Kafka binder, Spring Cloud
+  2023.0.1 / Stream 4.1.x). Topics, consumer groups and offsets are now configured in application.yml, not in code.
+- WIRE FORMAT UNCHANGED: messages are still JSON strings in the envelope
+  {eventType, eventId, timestamp, payload}; producers still serialize with Jackson and consumers still parse the
+  string and route on eventType. (The plan's JsonSerializer/JsonDeserializer was never used.)
+
+WHERE THE IMPLEMENTATION DIFFERS FROM THE PLAN BELOW (Member 1 / order-service)
+- Task 1.2, FILE 7 OrderEventProducer: injects org.springframework.cloud.stream.function.StreamBridge (not
+  KafkaTemplate<String, EventEnvelope>) and calls streamBridge.send("orderEvents-out-0", jsonString). The binding
+  orderEvents-out-0 is mapped to topic "order-events" in application.yml. publish(eventType, payload) is unchanged.
+- Task 1.2, MODIFY application.yml: the spring.kafka.producer block is replaced by
+  spring.cloud.stream.bindings.orderEvents-out-0.destination=order-events and
+  spring.cloud.stream.kafka.binder.brokers=localhost:9092.
+- Task 1.3, FILE 4 InventoryEventConsumer: implements java.util.function.Consumer<String> and is registered as the
+  bean "inventoryEvents" (@Component("inventoryEvents")); there is no @KafkaListener. application.yml sets
+  spring.cloud.function.definition=inventoryEvents and binds inventoryEvents-in-0 to topic "inventory-events",
+  group "order-service", startOffset earliest. The spring.kafka.consumer block is gone.
+- Task 1.1 / 1.5: the hard-coded unitPrice (74.99) and its "TEMP" note were REMOVED - see REVISION NOTES 2.
+- Task 1.3: rejection still publishes nothing (the spec contradicts itself; acceptance criteria won). The unused
+  OrderRejectedPayload class was deleted; the domain still raises an internal OrderRejected event.
+- Task 1.4: cancelOrder() also refuses orders that are already CANCELLED (extra to the plan). The statuses SHIPPED
+  and COMPLETED are never set by any code path.
+- Task 1.5/1.6: the LLM provider is Groq (llama-3.1-8b-instant) through langchain4j-open-ai, as the plan left the
+  provider open. Key via env var GROQ_API_KEY.
+=================================================
+
+=================================================
+REVISION NOTES 2 (2026-10-08) - restructuring, validation, tests
+=================================================
+STRUCTURE: every service was restructured into the four layers required by the course specification. The file
+paths in the original plan below map to the new packages like this (base package com.ecommerce.<service>):
+  controller/*                -> presentation.controller   (controllers + one @RestControllerAdvice ApiExceptionHandler)
+  dto/* (REST request/response)-> service.dto               (the service layer's API contract, also used as JSON)
+  service/*                   -> service                    (application services: orchestration only)
+  entity/*                    -> domain.model               (aggregates, entities, value objects - the business rules)
+  exception/*                 -> domain.exception
+  repository/*                -> domain.repository (PORT interface) + infrastructure.persistence (Spring Data + adapter)
+  event/dto, event/consumer, event/producer -> infrastructure.messaging (+ .dto)  [Kafka/Spring Cloud Stream]
+  client/*, config/*          -> infrastructure.client, infrastructure.config
+  streams/*                   -> infrastructure.streams
+Dependencies point inwards: presentation -> service -> domain <- infrastructure (infrastructure implements the ports
+declared in the domain). The domain layer has no Spring/Kafka/HTTP code except JPA annotations on the aggregates.
+
+WHERE THE ORDER SERVICE NOW DIFFERS FROM THE PLAN BELOW (Member 1)
+- DOMAIN MODEL (Task 1.1 FILES 1-2): Order is an aggregate root with OrderItem inside it, status is the enum
+  OrderStatus (stored as the same strings), money is the value object Money (2 decimals, never negative, embedded in
+  the same columns total_amount / unit_price). Order has @Version for optimistic locking. All rules are methods on
+  the aggregate: Order.place(...), confirm(), reject(reason), cancel(), isCancellable(). It records domain events
+  (OrderPlaced, OrderConfirmed, OrderCancelled, OrderRejected) that OrderService publishes AFTER the transaction
+  commits.
+- PRICING + VALIDATION (Task 1.1): POST /orders no longer uses a fixed price. OrderService calls Inventory
+  GET /products/{id} for every item (unit price = the product price) and Customer GET /customers/{id}. New error
+  responses: 400 for unknown customer, unknown product, empty items, quantity <= 0, missing customerId; 503 if
+  Inventory/Customer/Shipping cannot be reached (RestTemplate now has 2s connect / 5s read timeouts).
+  New config: customer-service.base-url (http://localhost:8084). The ports are ProductCatalog, CustomerDirectory,
+  ShipmentGateway; adapters are InventoryServiceClient, CustomerServiceClient, ShippingServiceClient.
+- STATE RULES (Tasks 1.3/1.4): confirmOrder()/rejectOrder() only act on a PENDING order - a late
+  InventoryReservedEvent for an order that was cancelled in the meantime is ignored (it used to flip CANCELLED back
+  to CONFIRMED). A REJECTED order can no longer be cancelled (409).
+- PUBLISHING (Task 1.2 FILE 7): OrderEventProducer was replaced by KafkaOrderEventPublisher, which translates domain
+  events into the unchanged JSON envelopes (OrderCreatedEvent, OrderConfirmedEvent, OrderCancelledEvent). Event
+  payload classes live in infrastructure.messaging.dto.
+- CANCELLATION (Task 1.4): the eligibility rule is the domain service CancellationPolicy (order status, then the
+  shipment status from Shipping, which is only fetched when the order status allows cancelling). OrderService.cancelOrder()
+  is still the single entry point used by both the REST endpoint and the agent's OrderCancelTool.
+- AI (Tasks 1.5/1.6): ProductLookupTool now uses the ProductCatalog port (and reports availableQuantity, not raw
+  stock); OrderCancelTool also handles malformed ids and an unreachable Shipping Service.
+- TESTS (new): domain tests (OrderTest, MoneyAndPolicyTest), application-service tests with in-memory fakes
+  (OrderServiceTest) and a Spring Cloud Stream test-binder test (OrderMessagingTest) that proves the Kafka messages
+  produced/consumed without a broker. Run with: mvn -pl order-service test
+=================================================
+
+=================================================
 MEMBER 1 — ORDER SERVICE + AGENTIC AI
 =================================================
 
