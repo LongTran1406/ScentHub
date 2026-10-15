@@ -5,3 +5,18 @@ target/
 .vscode/
 .DS_Store
 *.log
+
+# Secrets (API keys are read from environment variables, never stored in the repo)
+.env
+.env.*
+
+# Course / team files that are not part of the code
+CSCI318.xlsx
+combinepdf.pdf
+
+# Report drafts (written separately from the code) and Office lock files
+specs/report-drafts/
+~$*
+
+# Spec documents (markdown) kept out of version control
+specs/*.md
