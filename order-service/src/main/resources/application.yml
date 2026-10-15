@@ -45,7 +45,7 @@ customer-service:
 groq:
   api-key: ${GROQ_API_KEY:gsk_placeholder_replace_with_real_key_0000000000}
   base-url: https://api.groq.com/openai/v1
-  model-name: llama-3.1-8b-instant
+  model-name: openai/gpt-oss-20b
 
 server:
   port: 8081

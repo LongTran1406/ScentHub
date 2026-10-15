@@ -25,8 +25,12 @@ WHERE THE IMPLEMENTATION DIFFERS FROM THE PLAN BELOW (Member 1 / order-service)
   OrderRejectedPayload class was deleted; the domain still raises an internal OrderRejected event.
 - Task 1.4: cancelOrder() also refuses orders that are already CANCELLED (extra to the plan). The statuses SHIPPED
   and COMPLETED are never set by any code path.
-- Task 1.5/1.6: the LLM provider is Groq (llama-3.1-8b-instant) through langchain4j-open-ai, as the plan left the
-  provider open. Key via env var GROQ_API_KEY.
+- Task 1.5/1.6: the LLM provider is Groq through langchain4j-open-ai, as the plan left the
+  provider open. Model: openai/gpt-oss-20b (changed 2026-10-12: the first choice llama-3.1-8b-instant was retired by
+  Groq and returned model_not_found). Key via env var GROQ_API_KEY.
+- Task 1.5/1.6 prompts: tightened on 2026-10-13 after a live test (the agent offered cart/wishlist actions and invented
+  alternative scents; it also answered off-topic questions). The prompts shown further down in this file are the
+  ORIGINAL plan text; the current ones are in ProductConsultAgent / CancelSupportAgent and in specs/7-agentic-ai.md.
 =================================================
 
 =================================================

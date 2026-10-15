@@ -71,7 +71,7 @@ Other config, already set correctly for local dev, no changes needed:
 | `product-service.base-url` | `http://localhost:8082` | product price/existence check when creating an order, and the AI agent's product lookup |
 | `customer-service.base-url` | `http://localhost:8084` | customer existence check when creating an order |
 | `groq.base-url` | `https://api.groq.com/openai/v1` | Groq's OpenAI-compatible endpoint |
-| `groq.model-name` | `llama-3.1-8b-instant` | which Groq-hosted model to use |
+| `groq.model-name` | `openai/gpt-oss-20b` | which Groq-hosted model to use (Groq retires models from time to time; check `GET https://api.groq.com/openai/v1/models` if you get `model_not_found`) |
 
 ## How to run
 
