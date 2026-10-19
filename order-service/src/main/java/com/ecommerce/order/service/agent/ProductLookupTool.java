@@ -17,7 +17,8 @@ public class ProductLookupTool {
         this.productCatalog = productCatalog;
     }
 
-    @Tool("Search for products by name or keyword and return matching products with price and stock")
+    @Tool("Search for products by ONE short keyword such as a product name or scent (for example 'rose'), "
+        + "not a full sentence or several words, and return matching products with price and stock")
     public String searchProducts(String keyword) {
         List<ProductSnapshot> products = productCatalog.searchProducts(keyword);
         if (products.isEmpty()) {

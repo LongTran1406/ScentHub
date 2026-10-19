@@ -31,6 +31,9 @@ WHERE THE IMPLEMENTATION DIFFERS FROM THE PLAN BELOW (Member 1 / order-service)
 - Task 1.5/1.6 prompts: tightened on 2026-10-13 after a live test (the agent offered cart/wishlist actions and invented
   alternative scents; it also answered off-topic questions). The prompts shown further down in this file are the
   ORIGINAL plan text; the current ones are in ProductConsultAgent / CancelSupportAgent and in specs/7-agentic-ai.md.
+- Task 1.5 tool description: ProductLookupTool.searchProducts now tells the model to pass ONE short keyword (2026-10-18).
+  Before, "Do you have any rose perfume?" made the model search for the whole phrase "rose perfume", which matches
+  no product name (the search is a substring match), so the agent wrongly answered that nothing was found.
 =================================================
 
 =================================================

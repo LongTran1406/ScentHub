@@ -115,6 +115,9 @@ main `streams` section (read by the function processor) and mirrored in the `kst
    docker compose up -d
    ```
    If Kafka exits with `NodeExists` after an unclean shutdown, run `docker compose down` and `up -d` again.
+   If you recreate Kafka (`docker compose down`), also delete the saved Kafka Streams state before restarting the
+   inventory-service, otherwise `/analytics/revenue` adds the new orders on top of the old total:
+   `Remove-Item -Recurse -Force "$env:TEMP\scenthub-streams"` (PowerShell) or `rm -rf "${TMPDIR:-/tmp}/scenthub-streams"` (bash).
 2. (Optional, for real AI replies) set the Groq key before starting order-service:
    ```powershell
    $env:GROQ_API_KEY = "your-key"      # PowerShell
