@@ -21,5 +21,3 @@ specs/report-drafts/
 # Spec documents (markdown) kept out of version control
 specs/*.md
 
-# Course specification PDF
-CSCI318 Project Specification Spring 2026.pdf
